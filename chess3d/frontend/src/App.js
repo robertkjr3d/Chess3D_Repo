@@ -1175,6 +1175,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   sceneScale={sceneScale}
                   currentTurn={currentTurn}
                   setCurrentTurn={setCurrentTurn}
+                  lastMove={lastMove}
+                  setLastMove={setLastMove}
                   gameOver={gameOver}
                 />
                 <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} />
