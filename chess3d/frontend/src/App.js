@@ -113,7 +113,15 @@ function simulateMove(pieces, moverId, target) {
   } else {
     filtered = pieces.filter(pp => !(pp.x === target.x && pp.y === target.y && pp.z === target.z && pp.color !== movingColor));
   }
-  const next = filtered.map(pp => pp.id === moverId ? { ...pp, x: target.x, y: target.y, z: target.z } : pp);
+  const next = filtered.map(pp => {
+    if (pp.id === moverId) return { ...pp, x: target.x, y: target.y, z: target.z, hasMoved: true };
+    // handle castling rook move when target.castle provided
+    if (target && target.castle && pp.id === target.castle.rookId) {
+      const rt = target.castle.rookTo;
+      return { ...pp, x: rt.x, y: rt.y, z: rt.z, hasMoved: true };
+    }
+    return pp;
+  });
   return next;
 }
 
@@ -318,7 +326,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       );
     }
 
-    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerDepthRef, pointerDownPieceRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, gameOver }) {
+    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, gameOver }) {
       const levels = LEVEL_Y;
       const pieces = [];
 
@@ -341,7 +349,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       // compute legal moves for a selected white piece (pawns + knights)
       const legalMoves = useMemo(() => {
         const occupiedMap = new Map(allPieces.map((p) => [`${p.x},${p.y},${p.z}`, p.color]));
-        const moves = [];
+        let moves = [];
         if (selectedPieceId == null) return moves;
         const sel = allPieces.find((pp) => pp.id === selectedPieceId);
         if (!sel || sel.color !== currentTurn) return moves;
@@ -488,7 +496,142 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             if (occupiedMap.get(key) === friendly) return;
             moves.push({ x: nx, y: ny, z: nz });
           });
+
+          // Castling (QuadLevel variant): king may castle toward a rook along X (files) or Z (levels)
+          try {
+            if (!sel.hasMoved) {
+              const enemy = friendly === 'white' ? 'black' : 'white';
+              const rooks = allPieces.filter(p => p.t === 'R' && p.color === friendly && p.x === sx);
+
+              const queenBlockMap = {
+                '0,1,1->0,3,1': '0,2,0',
+                '0,1,1->0,1,3': '0,0,2',
+                '0,2,2->0,0,2': '0,1,3',
+                '0,2,2->0,2,0': '0,3,1',
+              };
+
+              const pathClearFrom = (rxx, ryy, rzz, order, targetYParam = sy, targetZParam = sz) => {
+                let cx = rxx, cy = ryy, cz = rzz;
+                for (const axis of order) {
+                  if (axis === 'y') {
+                    const targetY = targetYParam;
+                    const dirY = Math.sign(targetY - cy);
+                    if (dirY !== 0) {
+                      for (let yy = cy + dirY; yy !== targetY; yy += dirY) {
+                        if (occupiedMap.has(`${cx},${yy},${cz}`)) return false;
+                      }
+                    }
+                    cy = targetY;
+                  } else if (axis === 'z') {
+                    const targetZ = targetZParam;
+                    const dirZ = Math.sign(targetZ - cz);
+                    if (dirZ !== 0) {
+                      for (let zz = cz + dirZ; zz !== targetZ; zz += dirZ) {
+                        if (occupiedMap.has(`${cx},${cy},${zz}`)) return false;
+                      }
+                    }
+                    cz = targetZ;
+                  }
+                }
+                return true;
+              };
+
+              for (const rook of rooks) {
+                if (rook.hasMoved) continue;
+                const rx = rook.x, ry = rook.y, rz = rook.z;
+                const candidateLandings = [];
+                if (ry !== sy) candidateLandings.push({ x: sx, y: sy + Math.sign(ry - sy), z: sz, axis: 'y' });
+                if (rz !== sz) candidateLandings.push({ x: sx, y: sy, z: sz + Math.sign(rz - sz), axis: 'z' });
+
+                for (const landing of candidateLandings) {
+                  const landingKey = `${landing.x},${landing.y},${landing.z}`;
+                  if (occupiedMap.has(landingKey)) continue;
+                  if (isSquareAttacked(allPieces, sx, sy, sz, enemy)) continue;
+                  if (isSquareAttacked(allPieces, landing.x, landing.y, landing.z, enemy)) continue;
+
+                  const okPathToKingOrig = pathClearFrom(rx, ry, rz, ['y','z'], sy, sz) || pathClearFrom(rx, ry, rz, ['z','y'], sy, sz);
+                  if (okPathToKingOrig) {
+                    moves.push({ x: landing.x, y: landing.y, z: landing.z, castle: { type: 'king', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo: { x: sx, y: sy, z: sz } } });
+                  }
+
+                  // unified queen-side handling (both Y and Z axis cases)
+                  if (landing.axis === 'y' || landing.axis === 'z') {
+                    const kingLanding = landing.axis === 'y' ? { x: sx, y: ry, z: sz } : { x: sx, y: sy, z: rz };
+                    const mapKey = `${sx},${sy},${sz}->${kingLanding.x},${kingLanding.y},${kingLanding.z}`;
+                    let mapped = queenBlockMap[mapKey];
+                    // If not found and this is the white side, try mirrored lookup (mirror X across board)
+                    if (!mapped && friendly === 'white') {
+                      const mirror = (s) => {
+                        const [ax, ay, az] = s.split(',').map(Number);
+                        return `${7 - ax},${ay},${az}`;
+                      };
+                      const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${kingLanding.x},${kingLanding.y},${kingLanding.z}`)}`;
+                      const mappedMirrored = queenBlockMap[mirroredKey];
+                      if (mappedMirrored) mapped = mirror(mappedMirrored);
+                      try { console.debug('queenBlockMap mirrored lookup', { mirroredKey, mappedMirrored, mapped }); } catch (e) {}
+                    }
+                    try { console.debug('queenBlockMap check unified', { mapKey, mapped, occupied: occupiedMap.get(mapped) }); } catch (e) {}
+                    if (mapped && occupiedMap.get(mapped)) continue;
+
+                    // helper: return array of coord-strings strictly between A (exclusive) and B (exclusive)
+                    const betweenExclusive = (A, B) => {
+                      const res = [];
+                      const dx = Math.sign(B.x - A.x);
+                      const dy = Math.sign(B.y - A.y);
+                      const dz = Math.sign(B.z - A.z);
+                      let cx = A.x + dx, cy = A.y + dy, cz = A.z + dz;
+                      while (!(cx === B.x && cy === B.y && cz === B.z)) {
+                        res.push(`${cx},${cy},${cz}`);
+                        cx += dx; cy += dy; cz += dz;
+                        // safety: avoid infinite loop
+                        if (res.length > 20) break;
+                      }
+                      return res;
+                    };
+
+                    // ensure king path (squares between start and landing) are empty and not attacked
+                    const kingBetween = betweenExclusive({ x: sx, y: sy, z: sz }, kingLanding);
+                    let kingPathClear = true;
+                    for (const sq of kingBetween) {
+                      if (occupiedMap.has(sq)) { kingPathClear = false; break; }
+                      const [kx, ky, kz] = sq.split(',').map(Number);
+                      if (isSquareAttacked(allPieces, kx, ky, kz, enemy)) { kingPathClear = false; break; }
+                    }
+                    if (!kingPathClear) continue;
+
+                    // ensure rook path from rook -> rookTo is clear (exclusive)
+                    const rookTo = landing.axis === 'y' ? { x: sx, y: sy + Math.sign(ry - sy), z: sz } : { x: sx, y: sy, z: sz + Math.sign(rz - sz) };
+                    const rookBetween = betweenExclusive({ x: rx, y: ry, z: rz }, rookTo);
+                    let rookPathClear = true;
+                    for (const sq of rookBetween) {
+                      if (occupiedMap.has(sq)) { rookPathClear = false; break; }
+                    }
+                    if (!rookPathClear) continue;
+
+                    // additional safety: verify rook can reach rookTo via our existing pathClearFrom fallback
+                    const okRookPath = pathClearFrom(rx, ry, rz, ['y','z'], rookTo.y, rookTo.z) || pathClearFrom(rx, ry, rz, ['z','y'], rookTo.y, rookTo.z);
+                    if (!okRookPath) continue;
+
+                    moves.push({ x: kingLanding.x, y: kingLanding.y, z: kingLanding.z, castle: { type: 'queen', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } });
+                  }
+                }
+              }
+            }
+          } catch (e) {}
         }
+        // dedupe moves so special metadata (e.g., castle) is preserved when a standard one-step move
+        // and a castling-generated move land on the same square. Merge properties in that case.
+        try {
+          const merged = new Map();
+          const uniq = [];
+          for (const m of moves) {
+            const k = `${m.x},${m.y},${m.z}`;
+            if (!merged.has(k)) { merged.set(k, m); uniq.push(m); }
+            else { Object.assign(merged.get(k), m); }
+          }
+          moves = uniq;
+        } catch (e) {}
+
         // filter out moves that leave any of the mover's kings in check
         const legal = moves.filter((m) => {
           const next = simulateMove(allPieces, sel.id, m);
@@ -540,10 +683,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               // toggle selection when clicking same piece
                 if (gameOver) return;
                 if (p.color === currentTurn) {
+                // record which piece was pressed and whether it was already selected
+                try { pointerDownPieceRef.current = p.id; pointerDownWasSelectedRef.current = (selectedPieceId === p.id); } catch {}
                 if (selectedPieceId === p.id) {
-                  // user pressed on already-selected piece: mark which piece started the press
-                  try { pointerDownPieceRef.current = p.id; } catch {}
+                  // pressed the already-selected piece; selection toggle handled on pointer up
                 } else {
+                  // select the new piece immediately so dragging can start
                   setSelectedPieceId(p.id);
                 }
                 // record pointer-down start and initial drag height; don't start dragging yet
@@ -576,6 +721,20 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 // immediately disable OrbitControls so the board doesn't move while attempting drag
                 try { if (controlsRef.current) controlsRef.current.enabled = false; } catch {}
               } else {
+                // if user clicked an enemy piece while a piece is selected, treat as click-to-capture
+                try {
+                  if (selectedPieceId != null) {
+                    const lx = p.x; const ly = p.y; const lz = p.z;
+                    const mv = legalMoves.find(mv => mv.x === lx && mv.y === ly && mv.z === lz);
+                    if (mv) {
+                      e.stopPropagation();
+                      try { if (controlsRef.current) controlsRef.current.enabled = false; } catch {}
+                      try { moveTo(mv); } catch (err) {}
+                      // consumed click
+                      return;
+                    }
+                  }
+                } catch (err) {}
                 setSelectedPieceId(null);
               }
             }}
@@ -595,6 +754,16 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const moveTo = useCallback((target) => {
         if (selectedPieceId == null) return;
         if (moveLockRef.current) return;
+        // if this is a king-side castling attempt, confirm with the user; queen-side is automatic
+        try {
+          if (target && target.castle && target.castle.type === 'king') {
+            const ok = typeof window !== 'undefined' ? window.confirm('Castle?') : true;
+            if (!ok) {
+              setSelectedPieceId(null);
+              return;
+            }
+          }
+        } catch (e) {}
         moveLockRef.current = true;
         // clear lock shortly after to allow subsequent moves
         setTimeout(() => { moveLockRef.current = false; }, 50);
@@ -611,7 +780,15 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             } else {
               withoutCaptured = prev.filter(pp => !(pp.x === target.x && pp.y === target.y && pp.z === target.z && pp.color !== movingColor));
             }
-            const next = withoutCaptured.map((pp) => pp.id === selectedPieceId ? { ...pp, x: target.x, y: target.y, z: target.z } : pp);
+            const next = withoutCaptured.map((pp) => {
+              if (pp.id === selectedPieceId) return { ...pp, x: target.x, y: target.y, z: target.z, hasMoved: true };
+              // handle castling rook movement
+              if (target && target.castle && pp.id === target.castle.rookId) {
+                const rt = target.castle.rookTo;
+                return { ...pp, x: rt.x, y: rt.y, z: rt.z, hasMoved: true };
+              }
+              return pp;
+            });
             try { console.log('moveTo:', { selectedPieceId, target, movingColor, beforeCount: prev.length, afterCount: next.length }); } catch (e) {}
             return next;
           } catch (e) { return prev; }
@@ -783,6 +960,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const pointerDepthRef = useRef(null);
       const pointerStartScreenRef = useRef(null);
       const pointerDownPieceRef = useRef(null);
+      const pointerDownWasSelectedRef = useRef(false);
       const groupRef = useRef();
       const sceneScale = 0.470;
       // load models once at App level and pass to children
@@ -816,8 +994,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         let id = 1;
         levels.forEach((lz) => {
           for (let row = 0; row < 4; row++) {
-            res.push({ id: id++, x: 1, y: row, z: lz, t: 'p', color: 'black' });
-            res.push({ id: id++, x: 6, y: row, z: lz, t: 'p', color: 'white' });
+            res.push({ id: id++, x: 1, y: row, z: lz, t: 'p', color: 'black', hasMoved: false });
+            res.push({ id: id++, x: 6, y: row, z: lz, t: 'p', color: 'white', hasMoved: false });
           }
         });
 
@@ -840,8 +1018,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           { x: 0, y: 3, z: 3, t: 'R' },
         ];
         placements.forEach((p) => {
-          res.push({ id: id++, x: p.x, y: p.y, z: p.z, t: p.t, color: 'black' });
-          res.push({ id: id++, x: 7 - p.x, y: p.y, z: p.z, t: p.t, color: 'white' });
+          res.push({ id: id++, x: p.x, y: p.y, z: p.z, t: p.t, color: 'black', hasMoved: false });
+          res.push({ id: id++, x: 7 - p.x, y: p.y, z: p.z, t: p.t, color: 'white', hasMoved: false });
         });
         return res;
       }
@@ -1119,16 +1297,19 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 if (!isDragging && pointerDownPieceRef.current) {
                   try {
                     const pid = pointerDownPieceRef.current;
-                    if (selectedPieceId === pid) {
-                      setSelectedPieceId(null);
+                    if (pointerDownWasSelectedRef.current) {
+                      // toggle when user pressed the already-selected piece
+                      if (selectedPieceId === pid) setSelectedPieceId(null);
+                      else setSelectedPieceId(pid);
                     } else {
-                      setSelectedPieceId(pid);
+                      // user pressed a different piece: ensure it is selected
+                      if (selectedPieceId !== pid) setSelectedPieceId(pid);
                     }
                   } catch (err) {}
                 }
                 // release drag anywhere
                 pointerDownRef.current = false;
-                try { pointerDownPieceRef.current = null; } catch {}
+                try { pointerDownPieceRef.current = null; pointerDownWasSelectedRef.current = false; } catch {}
                 pointerStartRef.current = null;
                 try { pointerStartScreenRef.current = null; } catch {}
                 try { if (pointerDepthRef) pointerDepthRef.current = null; } catch {}
@@ -1176,8 +1357,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   currentTurn={currentTurn}
                   setCurrentTurn={setCurrentTurn}
                   lastMove={lastMove}
-                  setLastMove={setLastMove}
-                  gameOver={gameOver}
+                    setLastMove={setLastMove}
+                    pointerDownWasSelectedRef={pointerDownWasSelectedRef}
+                    gameOver={gameOver}
                 />
                 <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} />
                 
