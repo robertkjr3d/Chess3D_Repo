@@ -1,0 +1,125 @@
+import { useState } from "react";
+import { Canvas } from "@react-three/fiber";
+import { OrbitControls } from "@react-three/drei";
+import "./App.css";
+
+function Square({ position, color }) {
+  return (
+    <mesh position={position}>
+      <boxGeometry args={[1, 0.15, 1]} />
+      <meshStandardMaterial color={color} />
+    </mesh>
+  );
+}
+
+function BoardLevel({ y }) {
+  const squares = [];
+  for (let x = 0; x < 8; x++) {
+    for (let z = 0; z < 4; z++) {
+      const isWhite = (x + z) % 2 === 0;
+      squares.push(
+        <Square
+          key={`${y}-${x}-${z}`}
+          position={[x - 3.5, y, z - 3.5]}
+          color={isWhite ? "#f0d9b5" : "#b58863"}
+        />
+      );
+    }
+  }
+  return <group>{squares}</group>;
+}
+
+function QuadLevelBoard() {
+  return (
+    <group>
+      <BoardLevel y={0} />
+      <BoardLevel y={3.725} />
+      <BoardLevel y={6.6} />
+      <BoardLevel y={8.75} />
+    </group>
+  );
+}
+
+function Pieces() {
+  const levels = [0, 3.725, 6.6, 8.75];
+  const pieces = [];
+
+  levels.forEach((y, li) => {
+    // simple demo starting setup: pawns on the two inner ranks, kings on the back ranks
+    for (let x = 0; x < 8; x++) {
+      // white pawns (nearer side)
+      pieces.push(
+        <mesh
+          key={`w-pawn-${li}-${x}`}
+          position={[x - 3.5, y + 0.35, 1 - 3.5]}
+        >
+          <sphereGeometry args={[0.35, 16, 12]} />
+          <meshStandardMaterial color="#ffffff" />
+        </mesh>
+      );
+
+      // black pawns (opponent side)
+      pieces.push(
+        <mesh
+          key={`b-pawn-${li}-${x}`}
+          position={[x - 3.5, y + 0.35, 2 - 3.5]}
+        >
+          <sphereGeometry args={[0.35, 16, 12]} />
+          <meshStandardMaterial color="#222222" />
+        </mesh>
+      );
+    }
+
+    // place kings as an example of a different piece shape
+    pieces.push(
+      <mesh key={`w-king-${li}`} position={[4 - 3.5, y + 0.45, 0 - 3.5]}>
+        <cylinderGeometry args={[0.28, 0.28, 0.9, 16]} />
+        <meshStandardMaterial color="#ffffff" />
+      </mesh>
+    );
+    pieces.push(
+      <mesh key={`b-king-${li}`} position={[4 - 3.5, y + 0.45, 3 - 3.5]}>
+        <cylinderGeometry args={[0.28, 0.28, 0.9, 16]} />
+        <meshStandardMaterial color="#222222" />
+      </mesh>
+    );
+  });
+
+  return <group>{pieces}</group>;
+}
+
+export default function App() {
+  const [aiSide, setAiSide] = useState(null);
+
+  return (
+    <div className="layout">
+      <aside className="sidebar">
+        <h2 className="title">Quadlevel 3D Chess</h2>
+        <div className="menu">
+          <button className="menu-button" onClick={() => setAiSide('white')}>
+            Play AI White
+          </button>
+          <button className="menu-button" onClick={() => setAiSide('black')}>
+            Play AI Black
+          </button>
+        </div>
+        {aiSide && <div className="status">AI playing: {aiSide}</div>}
+      </aside>
+      <main className="main">
+        <Canvas className="canvas" camera={{ position: [6, 5, -8], fov: 32 }}>
+          <ambientLight intensity={0.6} />
+          <directionalLight position={[5, 12, 5]} intensity={0.9} />
+          <group scale={0.470}>
+            <QuadLevelBoard />
+            <Pieces />
+          </group>
+          <OrbitControls
+            makeDefault
+            enablePan={false}
+            target={[0, 1.7, 0]}
+          />
+        </Canvas>
+      </main>
+    </div>
+  );
+}

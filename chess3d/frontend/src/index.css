@@ -11,3 +11,46 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+/* Layout for app with left sidebar and canvas area */
+.app-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 220px;
+  background: #f4f7fb;
+  border-right: 1px solid rgba(0,0,0,0.06);
+  padding: 18px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sidebar h2 {
+  margin: 0 0 8px 0;
+  font-size: 16px;
+  color: #1f2937;
+}
+
+.sidebar button {
+  padding: 8px 10px;
+  border: none;
+  background: #2b6cb0;
+  color: white;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.sidebar button.secondary {
+  background: #4b5563;
+}
+
+.canvas-wrap {
+  flex: 1 1 auto;
+}

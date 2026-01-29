@@ -1,0 +1,335 @@
+import { useState, useRef, useEffect } from "react";
+import { Canvas } from "@react-three/fiber";
+import { OrbitControls, useGLTF } from "@react-three/drei";
+import "./App.css";
+
+function Square({ position, color }) {
+  return (
+    <mesh position={position}>
+      <boxGeometry args={[1, 0.15, 1]} />
+      <meshStandardMaterial color={color} />
+    </mesh>
+  );
+}
+
+function BoardLevel({ y, flip = false }) {
+  const squares = [];
+  for (let x = 0; x < 8; x++) {
+    for (let row = 0; row < 4; row++) {
+      // within-board rows use logical y; flip so logical y=0 maps to visual top within board
+      const yIndex = 3 - row;
+      const isWhite = ((x + yIndex + (flip ? 1 : 0)) % 2) !== 0;
+      squares.push(
+        <Square
+          key={`${y}-${x}-${row}`}
+          // world coordinates: X, world Y (level), world Z (in-board row)
+          position={[x - 3.5, y, yIndex - 3.5]}
+          color={isWhite ? "#f0d9b5" : "#b58863"}
+        />
+      );
+    }
+  }
+  return <group>{squares}</group>;
+}
+
+function QuadLevelBoard() {
+  return (
+    <group>
+      <BoardLevel y={0} flip={true} />
+      <BoardLevel y={3.725} flip={false} />
+      <BoardLevel y={6.6} flip={true} />
+      <BoardLevel y={8.75} flip={false} />
+    </group>
+  );
+}
+
+function Pieces({ selectedPiece, setSelectedPiece }) {
+  const levels = [0, 3.725, 6.6, 8.75];
+  const pieces = [];
+
+  // Load GLB models from public/models
+  const kingGltf = useGLTF('/models/king2.glb');
+  const pawnGltf = useGLTF('/models/pawn2.glb');
+  const knightGltf = useGLTF('/models/knight_-_staunton_full_size_chess_set.glb');
+  const bishopGltf = useGLTF('/models/bishop_-_staunton_full_size_chess_set.glb');
+  const rookGltf = useGLTF('/models/rook_-_staunton_full_size_chess_set.glb');
+  const queenGltf = useGLTF('/models/queen_-_staunton_full_size_chess_set.glb');
+
+  // Per-piece scale constants (tweak these if models look too big/small)
+  const scaleMap = {
+    pawn: 0.013,
+    knight: 0.013,
+    bishop: 0.013,
+    rook: 0.013,
+    queen: 0.013,
+    king: 0.013,
+  };
+
+  function cloneAndColor(gltf, color) {
+    const obj = gltf.scene.clone(true);
+    obj.traverse((n) => {
+      if (n.isMesh) {
+        if (n.material) {
+          n.material = n.material.clone();
+          try { n.material.color.set(color); } catch (e) {}
+          n.castShadow = true;
+          n.receiveShadow = true;
+        }
+      }
+    });
+    return obj;
+  }
+
+  // Build a structured list of all pieces (logical coords) to compute occupancy and render
+  const allPieces = [];
+  levels.forEach((y, li) => {
+    for (let row = 0; row < 4; row++) {
+      const blackX = 1;
+      const whiteX = 6;
+      // logical coords: x (0..7), y=row (in-board row 0..3), z=li (board level 0..3)
+      allPieces.push({ x: blackX, y: row, z: li, t: 'p', color: 'black' });
+      allPieces.push({ x: whiteX, y: row, z: li, t: 'p', color: 'white' });
+    }
+  });
+
+  // specific other piece placements (kept the same logical coords as before)
+  const placements = [
+    { x: 0, y: 0, z: 0, t: 'R' },
+    { x: 0, y: 1, z: 0, t: 'N' },
+    { x: 0, y: 2, z: 0, t: 'B' },
+    { x: 0, y: 3, z: 0, t: 'R' },
+    { x: 0, y: 0, z: 1, t: 'B' },
+    { x: 0, y: 1, z: 1, t: 'K' },
+    { x: 0, y: 2, z: 1, t: 'Q' },
+    { x: 0, y: 3, z: 1, t: 'N' },
+    { x: 0, y: 0, z: 2, t: 'N' },
+    { x: 0, y: 1, z: 2, t: 'Q' },
+    { x: 0, y: 2, z: 2, t: 'K' },
+    { x: 0, y: 3, z: 2, t: 'B' },
+    { x: 0, y: 0, z: 3, t: 'R' },
+    { x: 0, y: 1, z: 3, t: 'B' },
+    { x: 0, y: 2, z: 3, t: 'N' },
+    { x: 0, y: 3, z: 3, t: 'R' },
+  ];
+  placements.forEach((p) => {
+    // mirrored white counterpart at x -> 7 - x
+    allPieces.push({ x: p.x, y: p.y, z: p.z, t: p.t, color: 'black' });
+    allPieces.push({ x: 7 - p.x, y: p.y, z: p.z, t: p.t, color: 'white' });
+  });
+
+  // occupancy set keyed by logical coords
+  const occupied = new Set(allPieces.map((p) => `${p.x},${p.y},${p.z}`));
+
+  // helper to convert logical coords to world positions
+  function worldPosFromLogical(lx, ly, lz) {
+    const wx = lx - 3.5;
+    const wy = levels[lz] + 0.11;
+    const wz = (3 - ly) - 3.5;
+    return [wx, wy, wz];
+  }
+
+  // compute legal moves for a selected white piece (pawns + knights)
+  const occupiedMap = new Map(allPieces.map((p) => [`${p.x},${p.y},${p.z}`, p.color]));
+  let legalMoves = [];
+  if (selectedPiece && selectedPiece.color === 'white') {
+    const { x: sx, y: sy, z: sz } = selectedPiece;
+
+    // Pawn moves (white moves toward decreasing x)
+    if (selectedPiece.t === 'p') {
+      const oneX = sx - 1;
+      const twoX = sx - 2;
+      if (oneX >= 0 && !occupiedMap.has(`${oneX},${sy},${sz}`)) {
+        legalMoves.push({ x: oneX, y: sy, z: sz });
+        if (sx === 6 && twoX >= 0 && !occupiedMap.has(`${twoX},${sy},${sz}`)) {
+          legalMoves.push({ x: twoX, y: sy, z: sz });
+        }
+      }
+    }
+
+    // Knight moves in 3D: all permutations of (2,1,0) across axes with sign combos
+    if (selectedPiece.t === 'N') {
+      const perms = [
+        [2, 1, 0], [2, 0, 1], [1, 2, 0], [1, 0, 2], [0, 2, 1], [0, 1, 2],
+      ];
+      const moveSet = new Set();
+      perms.forEach(([ax, ay, az]) => {
+        const xs = ax === 0 ? [0] : [-ax, ax];
+        const ys = ay === 0 ? [0] : [-ay, ay];
+        const zs = az === 0 ? [0] : [-az, az];
+        xs.forEach((dx) => ys.forEach((dy) => zs.forEach((dz) => {
+          const nx = sx + dx;
+          const ny = sy + dy;
+          const nz = sz + dz;
+          // bounds: x in 0..7, y in 0..3, z in 0..3
+          if (nx < 0 || nx > 7 || ny < 0 || ny > 3 || nz < 0 || nz > 3) return;
+          const key = `${nx},${ny},${nz}`;
+          // can't land on own piece
+          if (occupiedMap.get(key) === 'white') return;
+          moveSet.add(key);
+        })));
+      });
+      moveSet.forEach((k) => {
+        const [x, y, z] = k.split(',').map(Number);
+        legalMoves.push({ x, y, z });
+      });
+    }
+  }
+
+  // render all pieces
+  allPieces.forEach((p, idx) => {
+    const world = worldPosFromLogical(p.x, p.y, p.z);
+    const modelMap = {
+      R: rookGltf,
+      N: knightGltf,
+      B: bishopGltf,
+      K: kingGltf,
+      Q: queenGltf,
+      p: pawnGltf,
+    };
+    const gltf = modelMap[p.t] || pawnGltf;
+    const pieceNameMap = { N: 'knight', B: 'bishop', K: 'king', Q: 'queen' };
+    const s = scaleMap[pieceNameMap[p.t] || 'pawn'];
+
+    // clickable group for white pawns and knights
+    const isWhite = p.color === 'white';
+    pieces.push(
+      <group
+        key={`${p.color}-${p.t}-${idx}`}
+        position={world}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          if ((p.t === 'p' || p.t === 'N') && isWhite) {
+            setSelectedPiece({ x: p.x, y: p.y, z: p.z, t: p.t, color: p.color });
+          } else {
+            setSelectedPiece(null);
+          }
+        }}
+      >
+        <primitive
+          object={cloneAndColor(gltf, isWhite ? '#ffffff' : '#615c5c')}
+          scale={s}
+          rotation={isWhite ? [0, Math.PI, 0] : [0, 0, 0]}
+        />
+      </group>
+    );
+  });
+
+  // render move indicators (red dots)
+  const indicators = legalMoves.map((m, i) => {
+    const wp = worldPosFromLogical(m.x, m.y, m.z);
+    return (
+      <mesh key={`move-ind-${i}`} position={wp}>
+        <sphereGeometry args={[0.12, 16, 16]} />
+        <meshStandardMaterial color="#ff0000" />
+      </mesh>
+    );
+  });
+
+  return <group>{pieces.concat(indicators)}</group>;
+}
+
+export default function App() {
+  const [aiSide, setAiSide] = useState(null);
+  const [selectedPiece, setSelectedPiece] = useState(null);
+
+  // camera / controls persistence
+  const controlsRef = useRef();
+  // prefer explicit saved defaults if present; otherwise fall back to last-used camPos
+  const [camPos, setCamPos] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('camDefaultPos')) || JSON.parse(localStorage.getItem('camPos')) || [6, 5, -8];
+    } catch { return [6,5,-8]; }
+  });
+  const [camTarget, setCamTarget] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('camDefaultTarget')) || JSON.parse(localStorage.getItem('camTarget')) || [0, 1.7, 0];
+    } catch { return [0,1.7,0]; }
+  });
+  const [saveStatus, setSaveStatus] = useState('');
+
+  useEffect(() => {
+    // apply saved target to controls when they mount
+    if (controlsRef.current) {
+      const c = controlsRef.current;
+      if (c.target && Array.isArray(camTarget)) {
+        c.target.set(camTarget[0], camTarget[1], camTarget[2]);
+        c.update();
+      }
+      // ensure camera position if accessible
+      if (c.object && Array.isArray(camPos)) {
+        c.object.position.set(camPos[0], camPos[1], camPos[2]);
+      }
+    }
+  }, [controlsRef, camPos, camTarget]);
+
+  function saveCurrentAsDefault() {
+    const c = controlsRef.current;
+    if (!c || !c.object) return setSaveStatus('No controls');
+    const cam = c.object;
+    const pos = [cam.position.x, cam.position.y, cam.position.z];
+    const tgt = [c.target.x, c.target.y, c.target.z];
+    try {
+      localStorage.setItem('camDefaultPos', JSON.stringify(pos));
+      localStorage.setItem('camDefaultTarget', JSON.stringify(tgt));
+      setCamPos(pos);
+      setCamTarget(tgt);
+      setSaveStatus('Saved default view');
+      setTimeout(() => setSaveStatus(''), 2500);
+    } catch (e) {
+      setSaveStatus('Save failed');
+    }
+  }
+
+  return (
+    <div className="layout">
+      <aside className="sidebar">
+        <h2 className="title">Quadlevel 3D Chess</h2>
+        <div className="menu">
+          <button className="menu-button" onClick={() => setAiSide('white')}>
+            Play AI White
+          </button>
+          <button className="menu-button" onClick={() => setAiSide('black')}>
+            Play AI Black
+          </button>
+          <button className="menu-button" onClick={saveCurrentAsDefault}>
+            Save View As Default
+          </button>
+        </div>
+        {aiSide && <div className="status">AI playing: {aiSide}</div>}
+        {saveStatus && <div className="status">{saveStatus}</div>}
+      </aside>
+      <main className="main">
+        <Canvas className="canvas" camera={{ position: camPos, fov: 32 }}>
+          <ambientLight intensity={0.6} />
+          <directionalLight position={[5, 12, 5]} intensity={0.9} />
+          <group scale={0.470}>
+            <QuadLevelBoard />
+            <Pieces selectedPiece={selectedPiece} setSelectedPiece={setSelectedPiece} />
+          </group>
+          <OrbitControls
+            ref={controlsRef}
+            makeDefault
+            enablePan={false}
+            target={camTarget}
+            onEnd={() => {
+              // persist camera and target when user finishes interacting
+              const c = controlsRef.current;
+              if (!c) return;
+              const cam = c.object;
+              if (cam) {
+                const pos = [cam.position.x, cam.position.y, cam.position.z];
+                setCamPos(pos);
+                try { localStorage.setItem('camPos', JSON.stringify(pos)); } catch {}
+              }
+              if (c.target) {
+                const tgt = [c.target.x, c.target.y, c.target.z];
+                setCamTarget(tgt);
+                try { localStorage.setItem('camTarget', JSON.stringify(tgt)); } catch {}
+              }
+            }}
+          />
+        </Canvas>
+      </main>
+    </div>
+  );
+}

@@ -20,7 +20,9 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "vibebackup": "node scripts/backup.js",
+    "vibebackup:app": "node scripts/backup.js src/App.js"
   },
   "eslintConfig": {
     "extends": [
