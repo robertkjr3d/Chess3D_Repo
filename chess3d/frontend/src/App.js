@@ -21,8 +21,62 @@ const GHOST_SCALE_FACTOR = 1.0;
 //const DRAG_LEVEL_SCALE = [1.0, 0.8, 0.7, 0.6];
 const DRAG_LEVEL_SCALE = [0.6, 0.7, 0.8, 1.0];
 
+// Tuning constants for move hit detection
+// Adjust these to make clicking/drags more or less permissive.
+// - MOVE_PIXEL_THRESH: pixel distance from pointer to indicator to accept click
+// - MOVE_WORLD_THRESH: fallback world-space distance (units) when screen-space unavailable
+// - MOVE_HIT_RADIUS: invisible hit-sphere radius (world units) around indicator
+const MOVE_PIXEL_THRESH = 90; // pixels
+const MOVE_WORLD_THRESH = 1.6; // world units
+const MOVE_HIT_RADIUS = 0.5; // world units
+
 // Y positions for each logical level `z` (index 0 = TOP board, index 3 = BOTTOM board)
 const LEVEL_Y = [8.75, 6.6, 3.725, 0];
+
+// Known king-side blocking patterns (notation: "sx,sy,sz->kx,ky,kz" => blocking square)
+// These are small hard-coded exceptions for QuadLevel geometry where an orthogonal piece
+// blocks a castling path even though straight-line checks might not catch it.
+const KING_BLOCK_MAP = {
+  '0,2,2->0,3,2': '0,2,3',
+  '0,2,2->0,2,3': '0,3,2',
+  '0,1,1->0,1,0': '0,0,1',
+  '0,1,1->0,0,1': '0,1,0',
+};
+
+function lookupKingBlock(sx, sy, sz, kx, ky, kz, effectiveMap, color) {
+  try {
+    const kMapKey = `${sx},${sy},${sz}->${kx},${ky},${kz}`;
+    let mapped = (effectiveMap && effectiveMap[kMapKey]) || KING_BLOCK_MAP[kMapKey];
+    const mirror = (s) => {
+      const [ax, ay, az] = s.split(',').map(Number);
+      return `${7 - ax},${ay},${az}`;
+    };
+    if (!mapped && color === 'white') {
+      const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${kx},${ky},${kz}`)}`;
+      const mappedMirrored = (effectiveMap && effectiveMap[mirroredKey]) || KING_BLOCK_MAP[mirroredKey];
+      if (mappedMirrored) mapped = mirror(mappedMirrored);
+    }
+    return mapped || null;
+  } catch (e) { return null; }
+}
+
+function isBlockedByKingBlockMap(sx, sy, sz, kx, ky, kz, occupiedMap, color) {
+  try {
+    const kMapKey = `${sx},${sy},${sz}->${kx},${ky},${kz}`;
+    let mapped = KING_BLOCK_MAP[kMapKey];
+    if (!mapped && color === 'white') {
+      const mirror = (s) => {
+        const [ax, ay, az] = s.split(',').map(Number);
+        return `${7 - ax},${ay},${az}`;
+      };
+      const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${kx},${ky},${kz}`)}`;
+      const mappedMirrored = KING_BLOCK_MAP[mirroredKey];
+      if (mappedMirrored) mapped = mirror(mappedMirrored);
+    }
+    if (mapped && occupiedMap && occupiedMap.has(mapped)) return true;
+  } catch (e) {}
+  return false;
+}
 
 // Helper utilities for move/check logic
 //function keyOf(x,y,z){return `${x},${y},${z}`;}
@@ -30,9 +84,7 @@ function inBounds(x,y,z){return x>=0 && x<=7 && y>=0 && y<=3 && z>=0 && z<=3;}
 
 function isSquareAttacked(pieces, tx, ty, tz, byColor) {
   // pieces: array of {x,y,z,t,color}
-  // check pawns, knights, kings, sliding pieces
   const enemy = byColor;
-  // pawn attacks: follow same rules as pawn capture generation
   const dir = enemy === 'white' ? -1 : 1; // white pawns move -1 in x
   for (const p of pieces) {
     if (p.color !== enemy) continue;
@@ -326,7 +378,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       );
     }
 
-    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, gameOver }) {
+    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, gameOver }) {
       const levels = LEVEL_Y;
       const pieces = [];
 
@@ -340,7 +392,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
       // helper to convert logical coords to world positions
       function worldPosFromLogical(lx, ly, lz) {
-        const wx = lx - 3.5;
+        // When it's Black's turn we mirror the X axis so the board appears reversed
+        const effectiveLX = (currentTurn === 'black') ? (7 - lx) : lx;
+        const wx = effectiveLX - 3.5;
         const wy = levels[lz] + 0.11;
         const wz = (3 - ly) - 3.5;
         return [wx, wy, wz];
@@ -509,6 +563,15 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 '0,2,2->0,0,2': '0,1,3',
                 '0,2,2->0,2,0': '0,3,1',
               };
+              // specific king-side blocking cases where an orthogonal piece blocks castling path
+              const kingBlockMap = {
+                '0,2,2->0,3,2': '0,2,3',
+                '0,2,2->0,2,3': '0,3,2',              
+                '0,1,1->0,1,0': '0,0,1',              
+                '0,1,1->0,0,1': '0,1,0',              
+              };
+              // Merge with the global KING_BLOCK_MAP so generation and execution-time checks align
+              const effectiveKingBlockMap = { ...(typeof KING_BLOCK_MAP === 'object' ? KING_BLOCK_MAP : {}), ...kingBlockMap };
 
               const pathClearFrom = (rxx, ryy, rzz, order, targetYParam = sy, targetZParam = sz) => {
                 let cx = rxx, cy = ryy, cz = rzz;
@@ -549,9 +612,108 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   if (isSquareAttacked(allPieces, sx, sy, sz, enemy)) continue;
                   if (isSquareAttacked(allPieces, landing.x, landing.y, landing.z, enemy)) continue;
 
-                  const okPathToKingOrig = pathClearFrom(rx, ry, rz, ['y','z'], sy, sz) || pathClearFrom(rx, ry, rz, ['z','y'], sy, sz);
-                  if (okPathToKingOrig) {
-                    moves.push({ x: landing.x, y: landing.y, z: landing.z, castle: { type: 'king', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo: { x: sx, y: sy, z: sz } } });
+                  // stricter king-side checks: ensure king path squares are empty & not attacked,
+                  // rook path to its destination is clear, and rook can reach rookTo via pathClearFrom.
+                  // kingLanding is `landing` for king-side.
+                  const kingLanding = landing;
+
+                  // helper to compute between-exclusive coords from A to B
+                  const betweenExclusiveLocal = (A, B) => {
+                    const res = [];
+                    const dx = Math.sign(B.x - A.x);
+                    const dy = Math.sign(B.y - A.y);
+                    const dz = Math.sign(B.z - A.z);
+                    let cx = A.x + dx, cy = A.y + dy, cz = A.z + dz;
+                    while (!(cx === B.x && cy === B.y && cz === B.z)) {
+                      res.push(`${cx},${cy},${cz}`);
+                      cx += dx; cy += dy; cz += dz;
+                      if (res.length > 20) break;
+                    }
+                    return res;
+                  };
+
+                  // ensure king path between start and landing is empty and not attacked
+                  let kingPathOk = true;
+                  // check explicit king-side block map (avoid offering castle if mapped blocking square occupied)
+                    try {
+                    const kMapKey = `${sx},${sy},${sz}->${kingLanding.x},${kingLanding.y},${kingLanding.z}`;
+                    let kMapped = effectiveKingBlockMap[kMapKey];
+                    if (!kMapped && friendly === 'white') {
+                      const mirror = (s) => {
+                        const [ax, ay, az] = s.split(',').map(Number);
+                        return `${7 - ax},${ay},${az}`;
+                      };
+                      const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${kingLanding.x},${kingLanding.y},${kingLanding.z}`)}`;
+                      const mappedMirrored = effectiveKingBlockMap[mirroredKey];
+                      if (mappedMirrored) kMapped = mirror(mappedMirrored);
+                    }
+                    try { console.debug('kingBlockMap check', { kMapKey, kMapped, occupied: kMapped ? occupiedMap.get(kMapped) : null }); } catch (e) {}
+                    if (kMapped && occupiedMap.get(kMapped)) {
+                      // blocked by explicit king-side blocker
+                      kingPathOk = false;
+                    }
+                  } catch (e) {}
+
+                  const kingBetweenLocal = betweenExclusiveLocal({ x: sx, y: sy, z: sz }, kingLanding);
+                  for (const sq of kingBetweenLocal) {
+                    if (occupiedMap.has(sq)) { kingPathOk = false; break; }
+                    const [kx, ky, kz] = sq.split(',').map(Number);
+                    if (isSquareAttacked(allPieces, kx, ky, kz, enemy)) { kingPathOk = false; break; }
+                  }
+                  if (!kingPathOk) {
+                    // king cannot castle along this landing
+                  } else {
+                    // compute rookTo: rook moves to the king's original square for king-side
+                    const rookTo = { x: sx, y: sy, z: sz };
+                    // ensure rook path from rook -> rookTo is clear (exclusive)
+                    const rookBetweenLocal = betweenExclusiveLocal({ x: rx, y: ry, z: rz }, rookTo);
+                    let rookPathClearLocal = true;
+                    for (const sq of rookBetweenLocal) {
+                      if (occupiedMap.has(sq)) { rookPathClearLocal = false; break; }
+                    }
+                    if (rookPathClearLocal) {
+                      const okRookPathLocal = pathClearFrom(rx, ry, rz, ['y','z'], rookTo.y, rookTo.z) || pathClearFrom(rx, ry, rz, ['z','y'], rookTo.y, rookTo.z);
+                      if (okRookPathLocal) {
+                        // extra safety: block if any immediate neighbor of king origin is occupied (known blocking cases)
+                        const neighbors = [[sx+1,sy,sz],[sx-1,sy,sz],[sx,sy+1,sz],[sx,sy-1,sz],[sx,sy,sz+1],[sx,sy,sz-1]];
+                        let neighborBlocked = false;
+                        for (const [nx,ny,nz] of neighbors) {
+                          const k = `${nx},${ny},${nz}`;
+                          if (nx < 0 || nx > 7 || ny < 0 || ny > 3 || nz < 0 || nz > 3) continue;
+                          // ignore the rook's square and the kingLanding
+                          if (k === `${rx},${ry},${rz}`) continue;
+                          if (k === `${kingLanding.x},${kingLanding.y},${kingLanding.z}`) continue;
+                          if (occupiedMap.has(k)) { neighborBlocked = true; try { console.debug('king-side neighbor blocked', { k, rook: `${rx},${ry},${rz}`, kingLanding }); } catch (e) {} break; }
+                        }
+                        if (!neighborBlocked) {
+                          // simple blocking rule: consult king-block map and ensure mapped square is empty
+                          const mapped = lookupKingBlock(sx, sy, sz, kingLanding.x, kingLanding.y, kingLanding.z, effectiveKingBlockMap, friendly);
+                          if (mapped && occupiedMap && occupiedMap.has(mapped)) {
+                            try { console.debug('king-side candidate blocked by KING_BLOCK_MAP at generation', { from: [sx,sy,sz], landing: kingLanding, mapped }); } catch (e) {}
+                          } else {
+                            const castleCand = { x: landing.x, y: landing.y, z: landing.z, castle: { type: 'king', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } };
+                            try {
+                              if (typeof isCastleStillLegal === 'function') {
+                                if (!isCastleStillLegal(sel.id, castleCand.castle, allPieces)) {
+                                  try { console.debug('king-side candidate rejected by isCastleStillLegal at generation', { sel: [sx,sy,sz], landing, rook: [rx,ry,rz] }); } catch (e) {}
+                                } else {
+                                  moves.push(castleCand);
+                                  try { console.debug('king-side castle candidate added', { sx, sy, sz, landing, rook: { rx, ry, rz }, rookTo }); } catch (e) {}
+                                }
+                              } else {
+                                moves.push(castleCand);
+                                try { console.debug('king-side castle candidate added (no runtime check)', { sx, sy, sz, landing, rook: { rx, ry, rz }, rookTo }); } catch (e) {}
+                              }
+                            } catch (e) {
+                              // fallback: add candidate if check threw
+                              moves.push({ x: landing.x, y: landing.y, z: landing.z, castle: { type: 'king', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } });
+                            }
+                          }
+                        } else {
+                          try { console.debug('king-side castle blocked by neighbor', { sx, sy, sz, landing, rook: { rx, ry, rz }, rookTo }); } catch (e) {}
+                        }
+                      }
+                    }
                   }
 
                   // unified queen-side handling (both Y and Z axis cases)
@@ -612,7 +774,26 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     const okRookPath = pathClearFrom(rx, ry, rz, ['y','z'], rookTo.y, rookTo.z) || pathClearFrom(rx, ry, rz, ['z','y'], rookTo.y, rookTo.z);
                     if (!okRookPath) continue;
 
-                    moves.push({ x: kingLanding.x, y: kingLanding.y, z: kingLanding.z, castle: { type: 'queen', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } });
+                    // apply simple king-block rule for queen-side too
+                    const mappedQ = lookupKingBlock(sx, sy, sz, kingLanding.x, kingLanding.y, kingLanding.z, effectiveKingBlockMap, friendly);
+                    if (mappedQ && occupiedMap && occupiedMap.has(mappedQ)) {
+                      try { console.debug('queen-side candidate blocked by KING_BLOCK_MAP at generation', { from: [sx,sy,sz], kingLanding, mapped: mappedQ }); } catch (e) {}
+                    } else {
+                      const castleCandQ = { x: kingLanding.x, y: kingLanding.y, z: kingLanding.z, castle: { type: 'queen', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } };
+                      try {
+                        if (typeof isCastleStillLegal === 'function') {
+                          if (!isCastleStillLegal(sel.id, castleCandQ.castle, allPieces)) {
+                            try { console.debug('queen-side candidate rejected by isCastleStillLegal at generation', { sel: [sx,sy,sz], kingLanding, rook: [rx,ry,rz] }); } catch (e) {}
+                          } else {
+                            moves.push(castleCandQ);
+                          }
+                        } else {
+                          moves.push(castleCandQ);
+                        }
+                      } catch (e) {
+                        moves.push(castleCandQ);
+                      }
+                    }
                   }
                 }
               }
@@ -626,11 +807,38 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const uniq = [];
           for (const m of moves) {
             const k = `${m.x},${m.y},${m.z}`;
-            if (!merged.has(k)) { merged.set(k, m); uniq.push(m); }
-            else { Object.assign(merged.get(k), m); }
+            if (!merged.has(k)) {
+              merged.set(k, m);
+              uniq.push(m);
+            } else {
+              const existing = merged.get(k);
+              if (existing && existing.castle && m.castle) {
+                const mergedCopy = { ...m };
+                mergedCopy.castle = existing.castle;
+                Object.assign(existing, mergedCopy);
+              } else {
+                Object.assign(existing, m);
+              }
+            }
           }
           moves = uniq;
         } catch (e) {}
+
+          // Ensure castle.type matches the actual king displacement when generated.
+          // If mismatched (e.g., 'queen' recorded for a one-step king move), correct it
+          // so UI prompt logic (which checks for type==='king') works reliably.
+          try {
+            for (const m of moves) {
+              if (!m.castle) continue;
+              const dy = Math.abs(m.y - sel.y);
+              const dz = Math.abs(m.z - sel.z);
+              const desired = (dy === 2 || dz === 2) ? 'queen' : 'king';
+              if (m.castle.type !== desired) {
+                try { console.debug('fixing castle.type at generation', { from: [sel.x, sel.y, sel.z], landing: [m.x, m.y, m.z], before: m.castle.type, after: desired }); } catch (e) {}
+                m.castle = { ...m.castle, type: desired };
+              }
+            }
+          } catch (e) {}
 
         // filter out moves that leave any of the mover's kings in check
         const legal = moves.filter((m) => {
@@ -681,8 +889,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               e.stopPropagation();
               try { if (pointerStartScreenRef) pointerStartScreenRef.current = { x: e.clientX, y: e.clientY }; } catch {}
               // toggle selection when clicking same piece
-                if (gameOver) return;
-                if (p.color === currentTurn) {
+                  if (gameOver) return;
+                  // ignore input while a move is being applied
+                  if (moveLockRef.current) return;
+                  if (p.color === currentTurn) {
                 // record which piece was pressed and whether it was already selected
                 try { pointerDownPieceRef.current = p.id; pointerDownWasSelectedRef.current = (selectedPieceId === p.id); } catch {}
                 if (selectedPieceId === p.id) {
@@ -742,32 +952,219 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             <primitive
               object={(clones && clones[`${p.t}-${isWhite ? 'white' : '#615c5c'}`]) ? clones[`${p.t}-${isWhite ? 'white' : '#615c5c'}`].clone(true) : cloneAndColor(gltf, isWhite ? '#ffffff' : '#615c5c')}
               scale={s}
-              rotation={isWhite ? [0, Math.PI, 0] : [0, 0, 0]}
+              rotation={(p.color === currentTurn) ? [0, Math.PI, 0] : [0, 0, 0]}
             />
           </group>
         );
       });
 
-      const moveLockRef = useRef(false);
+      // Notation helpers for 3D chess (used when recording moves)
+      // Accept either 0-based coords (internal) or 1-based human coords.
+      // If callers pass already 1-based values, normalize back to 0-based first.
+      const squareToNotation = ({ x, y, z }) => {
+        const level = z + 1; // z=0 -> 1
+        const file = String.fromCharCode('a'.charCodeAt(0) + y); // y=0 -> a
+        const rank = 8 - x; // x 0..7 => rank 1..8
+        return `${level}${file}${rank}`;
+      };
 
-      // render move indicators (red dots)
-      const moveTo = useCallback((target) => {
-        if (selectedPieceId == null) return;
-        if (moveLockRef.current) return;
-        // if this is a king-side castling attempt, confirm with the user; queen-side is automatic
+      const generateMoveNotation = (mover, target, pieces) => {
+        if (!mover) return '';
+        // helper: map coords for notation only. Keep game coords untouched.
+        const mapCoordForNotation = (c, color) => {
+          if (!c) return c;
+          const ix = (typeof c.x === 'number') ? c.x : 0;
+          const iy = (typeof c.y === 'number') ? c.y : 0;
+          const iz = (typeof c.z === 'number') ? c.z : 0;
+          //if (color === 'black') return { x: 7 - ix, y: iy, z: iz };
+          return { x: ix, y: iy, z: iz };
+        };
+
         try {
-          if (target && target.castle && target.castle.type === 'king') {
-            const ok = typeof window !== 'undefined' ? window.confirm('Castle?') : true;
-            if (!ok) {
-              setSelectedPieceId(null);
-              return;
+          try { console.debug('generateMoveNotation inputs', { mover, target, piecesCount: pieces && pieces.length }); } catch (e) {}
+        } catch (e) {}
+
+        if (target && target.castle) {
+          const startLevel = mover.z + 1;
+          const endLevel = (target.castle && target.castle.rookTo) ? target.castle.rookTo.z + 1 : (target.z != null ? target.z + 1 : mover.z + 1);
+          const o = target.castle.type === 'queen' ? 'O-O-O' : 'O-O';
+          return `${startLevel}${o}${endLevel}`;
+        }
+        const piece = mover.t;
+        const letter = piece === 'p' ? '' : piece;
+        const mappedTarget = mapCoordForNotation(target || {}, mover.color);
+        const mappedOrigin = mapCoordForNotation(mover, mover.color);
+        const targetNotation = squareToNotation(mappedTarget || {});
+        try {
+          // also produce a simulated board after the move to inspect actual moved coords
+          const simulated = simulateMove(pieces || [], mover.id, target || {});
+          const moved = simulated.find(s => s.id === mover.id) || null;
+          try { console.debug('generateMoveNotation mapped', { mappedTarget, targetNotation, mappedOrigin, simulatedMoved: moved }); } catch (e) {}
+        } catch (e) { console.debug('simulateMove in notation err', e); }
+
+        // detect capture: explicit en-passant or an enemy occupying the target square
+        const isCapture = !!( (target && target.enPassant) || (pieces && pieces.find(p => p.x === (target && target.x) && p.y === (target && target.y) && p.z === (target && target.z) && p.color !== mover.color)) );
+
+        // Pawn notation: file of origin, include level if ambiguous (two pawns on same file could capture)
+        if (piece === 'p') {
+          if (!isCapture) return targetNotation;
+          const originFile = String.fromCharCode('a'.charCodeAt(0) + (mappedOrigin.y || 0));
+          // find other pawns on same file that can also capture this target
+          let ambiguousLevel = false;
+          if (pieces && pieces.length) {
+            for (const p of pieces) {
+              if (p.id === mover.id) continue;
+              if (p.t !== 'p' || p.color !== mover.color) continue;
+              if (p.y !== mover.y) continue; // same file (game coords)
+              if (canPieceMoveTo(p, target.x, target.y, target.z, pieces)) { ambiguousLevel = true; break; }
             }
           }
-        } catch (e) {}
+          if (ambiguousLevel) {
+            const levelPrefix = (mappedOrigin.z != null ? (mappedOrigin.z + 1) : 1);
+            return `${levelPrefix}${originFile}x${targetNotation}`;
+          }
+          return `${originFile}x${targetNotation}`;
+        }
+
+        // Non-pawn pieces
+        let ambiguous = false;
+        if (letter !== '') {
+          for (const p of pieces) {
+            if (p.id === mover.id) continue;
+            if (p.t !== mover.t) continue;
+            if (p.color !== mover.color) continue;
+            if (canPieceMoveTo(p, target.x, target.y, target.z, pieces)) { ambiguous = true; break; }
+          }
+        }
+        if (!ambiguous) return `${letter}${isCapture ? 'x' : ''}${targetNotation}`;
+        const origin = squareToNotation(mappedOrigin || {});
+        return `${letter}(${origin})${isCapture ? 'x' : ''}${targetNotation}`;
+      };
+
+      const moveLockRef = useRef(false);
+
+      // verify castling is still legal at execution time (defensive check)
+      const isCastleStillLegal = (moverId, castleObj, piecesArr) => {
+        try {
+          if (!castleObj) return false;
+          const mover = piecesArr.find(p => p.id === moverId);
+          if (!mover) return false;
+          if (mover.hasMoved) return false;
+          const rook = piecesArr.find(p => p.id === castleObj.rookId);
+          if (!rook) return false;
+          if (rook.hasMoved) return false;
+          const sx = mover.x, sy = mover.y, sz = mover.z;
+          const rx = rook.x, ry = rook.y, rz = rook.z;
+          const enemy = mover.color === 'white' ? 'black' : 'white';
+          const occupiedMapLocal = new Map((piecesArr || []).map(p => [`${p.x},${p.y},${p.z}`, p]));
+          // kingLanding from castleObj (when king-side we stored landing as kingTo)
+          const kLand = castleObj.kingTo || { x: mover.x, y: mover.y, z: mover.z };
+          // check explicit king-block map
+          try {
+            const mapped = lookupKingBlock(sx, sy, sz, kLand.x, kLand.y, kLand.z, null, mover.color);
+            if (mapped && occupiedMapLocal && occupiedMapLocal.has(mapped)) return false;
+          } catch (e) {}
+          // compute squares between king start and landing
+          const between = (A, B) => {
+            const res = [];
+            const dx = Math.sign(B.x - A.x);
+            const dy = Math.sign(B.y - A.y);
+            const dz = Math.sign(B.z - A.z);
+            let cx = A.x + dx, cy = A.y + dy, cz = A.z + dz;
+            while (!(cx === B.x && cy === B.y && cz === B.z)) {
+              res.push({ x: cx, y: cy, z: cz });
+              cx += dx; cy += dy; cz += dz;
+              if (res.length > 30) break;
+            }
+            return res;
+          };
+          const kingBetween = between({ x: sx, y: sy, z: sz }, kLand);
+          // king path must be empty and not attacked
+          for (const sq of kingBetween) {
+            const key = `${sq.x},${sq.y},${sq.z}`;
+            if (occupiedMapLocal.has(key)) return false;
+            if (isSquareAttacked(piecesArr, sq.x, sq.y, sq.z, enemy)) return false;
+          }
+          // rookTo typically is mover original square (for king-side) or computed elsewhere; use castleObj.rookTo
+          const rookTo = castleObj.rookTo || { x: sx, y: sy, z: sz };
+          const rookBetween = between({ x: rx, y: ry, z: rz }, rookTo);
+          for (const sq of rookBetween) {
+            const key = `${sq.x},${sq.y},${sq.z}`;
+            if (occupiedMapLocal.has(key)) return false;
+          }
+          // verify rook can reach rookTo via existing pathClearFrom logic (reuse small helper)
+          const pathClearFromLocal = (rxx, ryy, rzz, order, targetYParam = sy, targetZParam = sz) => {
+            let cx = rxx, cy = ryy, cz = rzz;
+            for (const axis of order) {
+              if (axis === 'y') {
+                const targetY = targetYParam;
+                const dirY = Math.sign(targetY - cy);
+                if (dirY !== 0) {
+                  for (let yy = cy + dirY; yy !== targetY; yy += dirY) {
+                    if (occupiedMapLocal.has(`${cx},${yy},${cz}`)) return false;
+                  }
+                }
+                cy = targetY;
+              } else if (axis === 'z') {
+                const targetZ = targetZParam;
+                const dirZ = Math.sign(targetZ - cz);
+                if (dirZ !== 0) {
+                  for (let zz = cz + dirZ; zz !== targetZ; zz += dirZ) {
+                    if (occupiedMapLocal.has(`${cx},${cy},${zz}`)) return false;
+                  }
+                }
+                cz = targetZ;
+              }
+            }
+            return true;
+          };
+          const okRook = pathClearFromLocal(rx, ry, rz, ['y','z'], rookTo.y, rookTo.z) || pathClearFromLocal(rx, ry, rz, ['z','y'], rookTo.y, rookTo.z);
+          if (!okRook) return false;
+          return true;
+        } catch (e) { return false; }
+      };
+
+      // extracted move executor so modal handlers can reuse it
+      const _doMove = useCallback((finalTarget) => {
+        if (moveLockRef.current) return;
         moveLockRef.current = true;
-        // clear lock shortly after to allow subsequent moves
-        setTimeout(() => { moveLockRef.current = false; }, 50);
-        const moverBefore = piecesState.find(pp => pp.id === selectedPieceId);
+        let moverBefore = null;
+        try {
+        if (finalTarget && finalTarget.castle) {
+          // Defensive pattern-check: ensure castle.type matches the actual king displacement
+          try {
+            moverBefore = piecesState.find(pp => pp.id === selectedPieceId);
+            if (moverBefore) {
+              const dx = Math.abs((finalTarget.x || 0) - moverBefore.x);
+              const dy = Math.abs((finalTarget.y || 0) - moverBefore.y);
+              const dz = Math.abs((finalTarget.z || 0) - moverBefore.z);
+              const cType = finalTarget.castle.type;
+              if (cType === 'queen' && !(dy === 2 || dz === 2)) {
+                try { console.debug('castle type mismatch: queen but king moved one-step; stripping castle', { moverBefore, finalTarget }); } catch (e) {}
+                finalTarget = { ...finalTarget, castle: null };
+              }
+              if (cType === 'king' && !(dy === 1 || dz === 1)) {
+                try { console.debug('castle type mismatch: king but king moved multi-step; stripping castle', { moverBefore, finalTarget }); } catch (e) {}
+                finalTarget = { ...finalTarget, castle: null };
+              }
+            }
+          } catch (e) {}
+          // defensive: re-check legality using latest piecesState; if illegal, strip castle metadata
+          try {
+            const legal = isCastleStillLegal(selectedPieceId, finalTarget.castle, piecesState || []);
+            if (!legal) {
+              try { console.debug('castle rejected at execution time', { selectedPieceId, finalTarget }); } catch (e) {}
+              finalTarget = { ...finalTarget, castle: null };
+            }
+          } catch (e) { finalTarget = { ...finalTarget, castle: null }; }
+        }
+        if (selectedPieceId == null) return;
+        moverBefore = piecesState.find(pp => pp.id === selectedPieceId);
+        let notation = '';
+        try { notation = generateMoveNotation(moverBefore, finalTarget, piecesState); } catch (err) { notation = ''; }
+        try {
+          try { console.debug('notation details', { moverBefore, target: finalTarget, targetNotation: squareToNotation(finalTarget), computedNotation: notation }); } catch (e) {}
+        } catch (e) {}
         setPiecesState((prev) => {
           const mover = prev.find(pp => pp.id === selectedPieceId);
           if (!mover) return prev;
@@ -775,24 +1172,65 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           // if target indicates en-passant capture, remove the captured pawn by id
           let withoutCaptured;
           try {
-            if (target && target.enPassant && target.capturedId) {
-              withoutCaptured = prev.filter(pp => pp.id !== target.capturedId);
+            if (finalTarget && finalTarget.enPassant && finalTarget.capturedId) {
+              withoutCaptured = prev.filter(pp => pp.id !== finalTarget.capturedId);
             } else {
-              withoutCaptured = prev.filter(pp => !(pp.x === target.x && pp.y === target.y && pp.z === target.z && pp.color !== movingColor));
+              withoutCaptured = prev.filter(pp => !(pp.x === finalTarget.x && pp.y === finalTarget.y && pp.z === finalTarget.z && pp.color !== movingColor));
             }
             const next = withoutCaptured.map((pp) => {
-              if (pp.id === selectedPieceId) return { ...pp, x: target.x, y: target.y, z: target.z, hasMoved: true };
-              // handle castling rook movement
-              if (target && target.castle && pp.id === target.castle.rookId) {
-                const rt = target.castle.rookTo;
-                return { ...pp, x: rt.x, y: rt.y, z: rt.z, hasMoved: true };
+              if (pp.id === selectedPieceId) return { ...pp, x: finalTarget.x, y: finalTarget.y, z: finalTarget.z, hasMoved: true };
+              // handle castling rook movement — compute safe rookTo so it never lands onto the king's landing square
+              if (finalTarget && finalTarget.castle && pp.id === finalTarget.castle.rookId) {
+                const originalRookTo = finalTarget.castle.rookTo;
+                // if rookTo equals king landing (would collide), fall back to mover's original square
+                let safeRookTo = originalRookTo;
+                try {
+                  if (originalRookTo && finalTarget && typeof finalTarget.x === 'number' && typeof originalRookTo.x === 'number') {
+                    if (originalRookTo.x === finalTarget.x && originalRookTo.y === finalTarget.y && originalRookTo.z === finalTarget.z) {
+                      // fall back to mover's original position (king's origin)
+                      safeRookTo = { x: mover.x, y: mover.y, z: mover.z };
+                    }
+                  }
+                } catch (e) {}
+                if (safeRookTo) return { ...pp, x: safeRookTo.x, y: safeRookTo.y, z: safeRookTo.z, hasMoved: true };
               }
               return pp;
             });
-            try { console.log('moveTo:', { selectedPieceId, target, movingColor, beforeCount: prev.length, afterCount: next.length }); } catch (e) {}
+            try { console.log('moveTo:', { selectedPieceId, target: finalTarget, movingColor, beforeCount: prev.length, afterCount: next.length }); } catch (e) {}
             return next;
           } catch (e) { return prev; }
         });
+        // record notation into moveHistory (use moverBefore.color for which side moved)
+        try {
+          if (notation && typeof setMoveHistory === 'function') {
+            const side = moverBefore ? moverBefore.color : null;
+            try { console.debug('recording notation', { notation, side }); } catch (e) {}
+            setMoveHistory(prev => {
+              const copy = prev ? prev.slice() : [];
+              if (side === 'white') {
+                const last = copy.length ? copy[copy.length - 1] : null;
+                if (last && last.white === notation) {
+                  try { console.debug('skipping duplicate white notation', notation); } catch (e) {}
+                  return copy;
+                }
+                copy.push({ white: notation, black: null });
+              } else if (side === 'black') {
+                if (copy.length === 0) {
+                  copy.push({ white: null, black: notation });
+                } else {
+                  const last = copy[copy.length - 1];
+                  if (last && last.black === notation) {
+                    try { console.debug('skipping duplicate black notation', notation); } catch (e) {}
+                    return copy;
+                  }
+                  copy[copy.length - 1] = { ...copy[copy.length - 1], black: notation };
+                }
+              }
+              try { console.debug('moveHistory now', copy); } catch (e) {}
+              return copy;
+            });
+          }
+        } catch (e) { console.debug('setMoveHistory error', e); }
         setSelectedPieceId(null);
         try {
           if (setCurrentTurn) setCurrentTurn((prev) => {
@@ -801,11 +1239,15 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             return next;
           });
         } catch (e) {}
+        } finally {
+          // release move lock after move application
+          try { moveLockRef.current = false; } catch (e) {}
+        }
         try {
           if (moverBefore && moverBefore.t === 'p') {
-            const dx = Math.abs(target.x - moverBefore.x);
+            const dx = Math.abs(finalTarget.x - moverBefore.x);
             if (dx === 2) {
-              const lm = { id: moverBefore.id, from: { x: moverBefore.x, y: moverBefore.y, z: moverBefore.z }, to: { x: target.x, y: target.y, z: target.z }, doubleStep: true };
+              const lm = { id: moverBefore.id, from: { x: moverBefore.x, y: moverBefore.y, z: moverBefore.z }, to: { x: finalTarget.x, y: finalTarget.y, z: finalTarget.z }, doubleStep: true };
               try { if (setLastMove) setLastMove(lm); try { console.log('lastMove set', lm); } catch (e) {} } catch (e) {}
             } else {
               try { if (setLastMove) { setLastMove(null); try { console.log('lastMove cleared'); } catch (e) {} } } catch (e) {}
@@ -814,7 +1256,24 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             try { if (setLastMove) { setLastMove(null); try { console.log('lastMove cleared'); } catch (e) {} } } catch (e) {}
           }
         } catch (e) {}
-      }, [selectedPieceId, setPiecesState, setSelectedPieceId, setCurrentTurn, piecesState, setLastMove]);
+      }, [selectedPieceId, piecesState, setPiecesState, setSelectedPieceId, setCurrentTurn, setLastMove, setMoveHistory, generateMoveNotation, squareToNotation]);
+
+      // wrapper to prompt or execute
+      const moveTo = useCallback((target) => {
+        if (selectedPieceId == null) return;
+        if (moveLockRef.current) return;
+        try {
+          if (target && target.castle && target.castle.type === 'king') {
+            if (typeof showCastlePrompt === 'function') {
+              showCastlePrompt({ title: 'Castle?', onYes: () => _doMove(target), onNo: () => _doMove({ ...target, castle: null }) });
+              return;
+            }
+            const ok = typeof window !== 'undefined' ? window.confirm('Castle?') : true;
+            if (!ok) { setSelectedPieceId(null); return; }
+          }
+        } catch (e) {}
+        _doMove(target);
+      }, [selectedPieceId, moveLockRef, showCastlePrompt, _doMove]);
 
       // when App reports a pendingDrop, decide whether it's a legal landing square
       useEffect(() => {
@@ -827,22 +1286,61 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           // convert world point to local coords
           const v = new THREE.Vector3(pendingDrop[0], pendingDrop[1], pendingDrop[2]);
           if (groupRef && groupRef.current) groupRef.current.worldToLocal(v);
-          // determine nearest logical coords
-          const lx = Math.round(v.x + 3.5);
-          const ly = Math.round(3 - (v.z + 3.5));
-          // pick level by closest Y
-          const levels = LEVEL_Y;
-          let lz = 0;
-          let bestDist = Infinity;
-          for (let i = 0; i < levels.length; i++) {
-            const d = Math.abs(v.y - (levels[i] + 0.11));
-            if (d < bestDist) { bestDist = d; lz = i; }
+          // try: pick nearest legal move by screen-space distance (more perceptually appropriate)
+          let chosenMove = null;
+          try {
+            if (legalMoves && legalMoves.length > 0) {
+              // If we have a last screen position from pointer events, prefer pixel-distance check.
+              const canvas = document.querySelector('canvas');
+              const cam = controlsRef && controlsRef.current && controlsRef.current.object;
+              if (pointerLastScreenRef && pointerLastScreenRef.current && canvas && cam) {
+                try {
+                  const rect = canvas.getBoundingClientRect();
+                  let bestPx = Infinity; let bestMv = null;
+                  for (const mv of legalMoves) {
+                    const wp = worldPosFromLogical(mv.x, mv.y, mv.z);
+                    const vec = new THREE.Vector3(wp[0], wp[1], wp[2]).project(cam);
+                    const sx = rect.left + (vec.x + 1) * 0.5 * rect.width;
+                    const sy = rect.top + (-vec.y + 1) * 0.5 * rect.height;
+                    const dx = sx - pointerLastScreenRef.current.x;
+                    const dy = sy - pointerLastScreenRef.current.y;
+                    const pd = Math.hypot(dx, dy);
+                    if (pd < bestPx) { bestPx = pd; bestMv = mv; }
+                  }
+                  if (bestMv && bestPx <= MOVE_PIXEL_THRESH) chosenMove = bestMv;
+                } catch (err) { console.debug('pixel-tolerance check err', err); }
+              } else {
+                // fallback to world-space distance (legacy)
+                let best = Infinity; let bestMv = null;
+                for (const mv of legalMoves) {
+                  const wp = worldPosFromLogical(mv.x, mv.y, mv.z);
+                  const dx = wp[0] - v.x; const dy = wp[1] - v.y; const dz = wp[2] - v.z;
+                  const d = Math.hypot(dx, dy, dz);
+                  if (d < best) { best = d; bestMv = mv; }
+                }
+                if (bestMv && best <= MOVE_WORLD_THRESH) chosenMove = bestMv;
+              }
+            }
+          } catch (err) { console.debug('nearest-move selection error', err); }
+
+          // fallback: nearest logical rounding (legacy behavior)
+          if (!chosenMove) {
+            const lx = Math.round(v.x + 3.5);
+            const ly = Math.round(3 - (v.z + 3.5));
+            // pick level by closest Y
+            const levels = LEVEL_Y;
+            let lz = 0;
+            let bestDist = Infinity;
+            for (let i = 0; i < levels.length; i++) {
+              const d = Math.abs(v.y - (levels[i] + 0.11));
+              if (d < bestDist) { bestDist = d; lz = i; }
+            }
+            const moveObj = legalMoves.find(mv => mv.x === lx && mv.y === ly && mv.z === lz);
+            if (moveObj) chosenMove = moveObj;
           }
-          // const key = `${lx},${ly},${lz}`; // unused
-          // find a matching legal move object so we preserve en-passant metadata
-          const moveObj = legalMoves.find(mv => mv.x === lx && mv.y === ly && mv.z === lz);
-          if (moveObj) {
-            moveTo(moveObj);
+
+          if (chosenMove) {
+            moveTo(chosenMove);
           } else {
             // cancel drag: clear selection and leave piecesState unchanged
             setSelectedPieceId(null);
@@ -875,10 +1373,16 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           }
         }
         return (
-          <mesh key={`move-ind-${i}`} position={indicatorPos} onPointerUp={(e) => { e.stopPropagation(); moveTo(m); try { if (controlsRef.current) controlsRef.current.enabled = true; } catch{} }} renderOrder={999}>
-            <sphereGeometry args={[0.14, 16, 16]} />
-            <meshStandardMaterial color="#ff0000" depthTest={false} depthWrite={false} />
-          </mesh>
+          <group key={`move-ind-${i}`} position={indicatorPos}>
+            <mesh key={`move-ind-hit-${i}`} onPointerUp={(e) => { e.stopPropagation(); moveTo(m); try { if (controlsRef.current) controlsRef.current.enabled = true; } catch{} }} renderOrder={998}>
+              <sphereGeometry args={[MOVE_HIT_RADIUS, 8, 8]} />
+              <meshBasicMaterial transparent={true} opacity={0} depthTest={false} depthWrite={false} />
+            </mesh>
+            <mesh key={`move-ind-vis-${i}`} onPointerUp={(e) => { e.stopPropagation(); moveTo(m); try { if (controlsRef.current) controlsRef.current.enabled = true; } catch{} }} renderOrder={999}>
+              <sphereGeometry args={[0.14, 16, 16]} />
+              <meshStandardMaterial color="#ff0000" depthTest={false} depthWrite={false} />
+            </mesh>
+          </group>
         );
       });
 
@@ -887,7 +1391,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
     
 
-    function Ghost({ dragPoint, dragPointWorld, selectedPieceId, piecesState, isDragging, pointerDownRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones }) {
+    function Ghost({ dragPoint, dragPointWorld, selectedPieceId, piecesState, isDragging, pointerDownRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, currentTurn }) {
       const sel = piecesState.find((p) => p.id === selectedPieceId);
       const modelMap = {
         R: rookGltf,
@@ -935,7 +1439,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       // Ghost is rendered inside the same scaled group as pieces; use the adjusted scale so it matches.
       return (
         <group raycast={() => null} renderOrder={999}>
-          <primitive object={cloned} position={dragPoint} scale={[finalScale, finalScale, finalScale]} />
+          <primitive object={cloned} position={dragPoint} scale={[finalScale, finalScale, finalScale]} rotation={(sel.color === currentTurn) ? [0, Math.PI, 0] : [0,0,0]} />
         </group>
       );
     }
@@ -948,10 +1452,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         const [lastMove, setLastMove] = useState(null); // track last move for en-passant (double-step)
       const [aiSide, setAiSide] = useState(null);
       const [selectedPieceId, setSelectedPieceId] = useState(null);
+      const [moveHistory, setMoveHistory] = useState([]); // array of { white: string|null, black: string|null }
       const [isDragging, setIsDragging] = useState(false);
       const [dragPoint, setDragPoint] = useState([0, 0, 0]);
       const [dragHeight, setDragHeight] = useState(0);
       const [dragPointWorld, setDragPointWorld] = useState(null);
+      const [castlePrompt, setCastlePrompt] = useState(null);
       
       const [pendingDrop, setPendingDrop] = useState(null);
       const [pointerActive, setPointerActive] = useState(false);
@@ -959,6 +1465,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const pointerStartRef = useRef(null);
       const pointerDepthRef = useRef(null);
       const pointerStartScreenRef = useRef(null);
+      const pointerLastScreenRef = useRef(null);
       const pointerDownPieceRef = useRef(null);
       const pointerDownWasSelectedRef = useRef(false);
       const groupRef = useRef();
@@ -985,6 +1492,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         });
         return map;
       }, [kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf]);
+
+      const showCastlePrompt = (opts) => {
+        // opts: { title, onYes, onNo }
+        setCastlePrompt(opts);
+      };
       
 
       // build initial pieces list (logical coords)
@@ -1161,7 +1673,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       return (
         <>
         <div className="layout">
-          <aside className="sidebar">
+                <aside className="sidebar">
             <h2 className="title">Quadlevel 3D Chess</h2>
             <div className="menu">
               <button className="menu-button" onClick={() => setAiSide('white')}>
@@ -1172,15 +1684,39 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               </button>
             </div>
             <div className="status">AI playing: {aiSide || 'none'}</div>
-            <div className="status">Status: {statusMessage || 'none'}</div>
             <div className="status">Game Over: {gameOver ? `yes — ${gameWinner || 'unknown'}` : 'no'}</div>
             <div className="status">Last double-step: {lastMove ? `to [${lastMove.to.x},${lastMove.to.y},${lastMove.to.z}] id:${lastMove.id}` : 'none'}</div>
+            <div className="status">Status: {statusMessage || 'none'}</div>
+            {/* CHECK indicator: display prominent label when a side is in check */}
+            {statusMessage && statusMessage.toLowerCase().includes('check') ? (
+              <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECK</div>
+            ) : null}
+
+            <div style={{ marginTop: '10px' }}>
+              <div style={{ fontWeight: 'bold', marginBottom: '6px' }}>Moves</div>
+              <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+                {moveHistory.length === 0 ? <div style={{ color: '#888' }}>no moves</div> : (
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <tbody>
+                      {moveHistory.map((mv, idx) => (
+                        <tr key={`mh-${idx}`}>
+                          <td style={{ width: '40px', paddingRight: '6px' }}>{idx + 1}:</td>
+                          <td style={{ width: '50%', paddingRight: '6px' }}>{mv.white || ''}</td>
+                          <td style={{ width: '50%' }}>{mv.black || ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
           </aside>
           <main className="main">
             <Canvas
               className="canvas"
               camera={{ position: camPos, fov: 32 }}
               onPointerMove={(e) => {
+                try { pointerLastScreenRef.current = { x: e.clientX, y: e.clientY }; } catch {}
                 // if pointer was pressed on a piece and user moved enough (screen-space), start dragging
                 if (pointerDownRef.current && !isDragging && selectedPieceId != null && pointerStartScreenRef.current) {
                   const dx = e.clientX - pointerStartScreenRef.current.x;
@@ -1340,6 +1876,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   pointerDownRef={pointerDownRef}
                   pointerStartRef={pointerStartRef}
                   pointerDepthRef={pointerDepthRef}
+                  showCastlePrompt={showCastlePrompt}
                    kingGltf={kingGltf}
                    pawnGltf={pawnGltf}
                    knightGltf={knightGltf}
@@ -1347,8 +1884,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                    rookGltf={rookGltf}
                    queenGltf={queenGltf}
                    clones={clones}
+                  currentTurn={currentTurn}
                   pointerDownPieceRef={pointerDownPieceRef}
                   pointerStartScreenRef={pointerStartScreenRef}
+                  pointerLastScreenRef={pointerLastScreenRef}
                   pendingDrop={pendingDrop}
                   setPendingDrop={setPendingDrop}
                   groupRef={groupRef}
@@ -1359,9 +1898,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   lastMove={lastMove}
                     setLastMove={setLastMove}
                     pointerDownWasSelectedRef={pointerDownWasSelectedRef}
+                    setMoveHistory={setMoveHistory}
+                    moveHistory={moveHistory}
                     gameOver={gameOver}
                 />
-                <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} />
+                <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} currentTurn={currentTurn} />
                 
               </group>
                 
@@ -1394,7 +1935,20 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             </Canvas>
           </main>
         </div>
-        
+        {castlePrompt ? (
+          <div style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto' }}>
+            <div style={{ background: 'rgba(0,0,0,0.6)', position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+            <div style={{ zIndex: 9999, background: '#fff', padding: 20, borderRadius: 8, minWidth: 260, boxShadow: '0 10px 30px rgba(0,0,0,0.4)', textAlign: 'center' }}>
+              <div style={{ fontWeight: 'bold', marginBottom: 8 }}>{castlePrompt.title || 'Confirm'}</div>
+              <div style={{ marginBottom: 12, color: '#333' }}>Do you want to perform the castle-type move?</div>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                <button onClick={() => { try { castlePrompt.onYes && castlePrompt.onYes(); } catch (e) {} setCastlePrompt(null); }} style={{ padding: '6px 12px' }}>Yes</button>
+                <button onClick={() => { try { castlePrompt.onNo && castlePrompt.onNo(); } catch (e) {} setCastlePrompt(null); }} style={{ padding: '6px 12px' }}>No</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         </>
       );
     }
