@@ -13,6 +13,12 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
+  next();
+});
+
 const DB_PATH = path.join(process.cwd(), 'games.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
@@ -26,7 +32,22 @@ db.prepare(`CREATE TABLE IF NOT EXISTS games (
   updatedAt TEXT
 )`).run();
 
-app.get('/health', (req, res) => res.send('OK'));
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'running', 
+    message: 'Chess3D Backend API',
+    endpoints: {
+      health: '/health',
+      games: '/api/games'
+    }
+  });
+});
+
+app.get('/health', (req, res) => {
+  console.log('Health check requested');
+  res.send('OK');
+});
 
 // Create a new game or update if id provided and ownerToken matches
 app.post('/api/games', (req, res) => {
@@ -78,8 +99,10 @@ app.put('/api/games/:id', (req, res) => {
   }
 });
 
-server.listen(3001, () => {
-  console.log("Chess3D backend running on port 3001");
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Chess3D backend running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
 });
 
 const io = new Server(server, {

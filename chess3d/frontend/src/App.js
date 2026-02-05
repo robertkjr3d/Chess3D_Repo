@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF } from "@react-three/drei";
 import "./App.css";
+import { API_BASE_URL } from './config';
 
 const GLOBAL_PIECE_SCALE = {
   pawn: 0.013,
@@ -2906,12 +2907,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
           if (existingId) {
             // update
-            const resp = await fetch(`/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state, ownerToken }) });
+            const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state, ownerToken }) });
             if (!resp.ok) throw new Error('update failed');
             console.log('Saved to server (updated)');
             return;
           }
-          const resp = await fetch('/api/games', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
+          const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
           if (!resp.ok) throw new Error('save failed');
           const j = await resp.json();
           if (j.id && j.ownerToken) {
@@ -2930,12 +2931,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const existingId = localStorage.getItem(SERVER_ID_KEY);
           const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
           if (existingId) {
-            const resp = await fetch(`/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState, ownerToken }) });
+            const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState, ownerToken }) });
             if (!resp.ok) throw new Error('update failed');
             console.log('Saved to server (updated)');
             return;
           }
-          const resp = await fetch('/api/games', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState }) });
+          const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState }) });
           if (!resp.ok) throw new Error('save failed');
           const j = await resp.json();
           if (j.id && j.ownerToken) {
@@ -2957,7 +2958,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         try {
           const id = idPrompt || prompt('Enter game id to load:');
           if (!id) return;
-          const resp = await fetch(`/api/games/${id}`);
+          const resp = await fetch(`${API_BASE_URL}/api/games/${id}`);
           if (!resp.ok) { alert('Load failed'); return; }
           const j = await resp.json();
           if (j && j.state) {
