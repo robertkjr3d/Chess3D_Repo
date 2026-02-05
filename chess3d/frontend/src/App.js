@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import * as THREE from 'three';
 //import { Canvas, useThree, useFrame } from "@react-three/fiber";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF } from "@react-three/drei";
 import "./App.css";
 
@@ -43,6 +43,10 @@ const KING_BLOCK_MAP = {
   '0,1,1->0,0,1': '0,1,0',
 };
 
+// Optional map to provide explicit rook-from coordinates for tricky castling cases.
+// Keys use the same "sx,sy,sz->kx,ky,kz" format as KING_BLOCK_MAP.
+const ROOK_FROM_MAP = {};
+
 function lookupKingBlock(sx, sy, sz, kx, ky, kz, effectiveMap, color) {
   try {
     const kMapKey = `${sx},${sy},${sz}->${kx},${ky},${kz}`;
@@ -58,6 +62,15 @@ function lookupKingBlock(sx, sy, sz, kx, ky, kz, effectiveMap, color) {
     }
     return mapped || null;
   } catch (e) { return null; }
+}
+
+// Diagnostic component: logs Canvas mount/unmount events for a given key
+function CanvasLogger({ canvasKey }) {
+  useEffect(() => {
+    try { console.debug('Canvas mounted with key', canvasKey); } catch (e) {}
+    return () => { try { console.debug('Canvas unmounted with key', canvasKey); } catch (e) {} };
+  }, [canvasKey]);
+  return null;
 }
 
 function isBlockedByKingBlockMap(sx, sy, sz, kx, ky, kz, occupiedMap, color) {
@@ -148,22 +161,20 @@ function simulateMove(pieces, moverId, target) {
   if (!mover) return pieces.slice();
   const movingColor = mover.color;
   // handle en-passant if target includes capturedId
-  let filtered = pieces;
-  //if (target && target.enPassant) {
+  let filtered = pieces.slice();
   if (target) {
+    // explicit capturedId (used by some special moves)
     if (target.capturedId) {
       filtered = pieces.filter(pp => pp.id !== target.capturedId);
-    } else {
-      // fallback: captured pawn may not be present on target square;
-      // for en-passant the captured pawn sits on the mover's original file (mover.x)
-      // and on the landing square's y/z. Find an enemy pawn there and remove it.
+    } else if (target.enPassant) {
+      // en-passant: captured pawn is on mover's original file (mover.x) and at landing y/z
       const moverOrig = mover;
       const captured = pieces.find(pp => pp.color !== movingColor && pp.t === 'p' && pp.x === moverOrig.x && pp.y === target.y && pp.z === target.z);
       if (captured) filtered = pieces.filter(pp => pp.id !== captured.id);
-      else filtered = pieces.slice();
+    } else {
+      // normal capture: remove any enemy piece currently on the target square
+      filtered = pieces.filter(pp => !(pp.x === target.x && pp.y === target.y && pp.z === target.z && pp.color !== movingColor));
     }
-  } else {
-    filtered = pieces.filter(pp => !(pp.x === target.x && pp.y === target.y && pp.z === target.z && pp.color !== movingColor));
   }
   const next = filtered.map(pp => {
     if (pp.id === moverId) return { ...pp, x: target.x, y: target.y, z: target.z, hasMoved: true };
@@ -194,6 +205,45 @@ function attackersOfSquare(pieces, tx, ty, tz) {
     }
     return res;
   }
+
+// Static Exchange Evaluation (SEE) for a target square. Returns net material gain from the
+// perspective of `sideToMove` after the sequence of optimal captures on the square.
+function staticExchangeEval(pieces, tx, ty, tz, sideToMove) {
+  const vals = { p: 1, N: 3, B: 3, R: 5, Q: 9, K: 10000 };
+  // shallow copy of pieces for simulation
+  let board = pieces.map(p => ({ ...p }));
+  // helper to get piece value
+  const pieceValue = (t) => vals[t] || 0;
+  // initial captured piece value
+  const initial = board.find(p => p.x === tx && p.y === ty && p.z === tz);
+  const g = [];
+  g[0] = initial ? pieceValue(initial.t) : 0;
+  let side = sideToMove;
+  let depth = 0;
+  while (true) {
+    // find attackers of square on current board for `side`
+    const attackers = attackersOfSquare(board, tx, ty, tz).filter(a => a.color === side);
+    if (!attackers || attackers.length === 0) break;
+    // choose least valuable attacker
+    let least = attackers.reduce((a, b) => (pieceValue(a.t) <= pieceValue(b.t) ? a : b));
+    g[depth + 1] = pieceValue(least.t) - g[depth];
+    // remove the least attacker from board
+    board = board.filter(p => p.id !== least.id);
+    // remove any opposing piece on the square (it was captured)
+    board = board.filter(p => !(p.x === tx && p.y === ty && p.z === tz && p.color !== least.color));
+    // place the attacker on the square as the new occupant
+    board.push({ id: -1 - depth, x: tx, y: ty, z: tz, t: least.t, color: least.color });
+    // next side
+    side = side === 'white' ? 'black' : 'white';
+    depth++;
+    if (depth > 32) break; // safety
+  }
+  // back propagate best results
+  for (let i = g.length - 2; i >= 0; i--) {
+    g[i] = Math.max(-g[i + 1], g[i]);
+  }
+  return g[0];
+}
 
 function canPieceMoveTo(piece, tx, ty, tz, pieces) {
   // raw move perm (igno king in check)
@@ -348,13 +398,14 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       );
     }
 
-    function BoardLevel({ y, flip = false }) {
+    function BoardLevel({ y, flip = false, flipBoard = false }) {
       const squares = [];
       for (let x = 0; x < 8; x++) {
         for (let row = 0; row < 4; row++) {
           // within-board rows use logical y; flip so logical y=0 maps to visual top within board
           const yIndex = 3 - row;
-          const isWhite = ((x + yIndex + (flip ? 1 : 0)) % 2) !== 0;
+          const baseWhite = ((x + yIndex + (flip ? 1 : 0)) % 2) !== 0;
+          const isWhite = flipBoard ? !baseWhite : baseWhite;
           squares.push(
             <Square
               key={`${y}-${x}-${row}`}
@@ -368,17 +419,17 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       return <group>{squares}</group>;
     }
 
-    function QuadLevelBoard() {
+    function QuadLevelBoard({ flipBoard = false }) {
       // render from bottom -> top for correct visual stacking
       const bottomToTop = LEVEL_Y.slice().reverse();
       return (
         <group>
-          {bottomToTop.map((y, i) => <BoardLevel key={`lvl-${i}`} y={y} flip={i % 2 === 0} />)}
+          {bottomToTop.map((y, i) => <BoardLevel key={`lvl-${i}`} y={y} flip={i % 2 === 0} flipBoard={flipBoard} />)}
         </group>
       );
     }
 
-    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, gameOver }) {
+    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot }) {
       const levels = LEVEL_Y;
       const pieces = [];
 
@@ -393,7 +444,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       // helper to convert logical coords to world positions
       function worldPosFromLogical(lx, ly, lz) {
         // When it's Black's turn we mirror the X axis so the board appears reversed
-        const effectiveLX = (currentTurn === 'black') ? (7 - lx) : lx;
+        // do not auto-flip board view when an AI player is running
+        const effectiveLX = (aiSide ? lx : ((currentTurn === 'black') ? (7 - lx) : lx));
         const wx = effectiveLX - 3.5;
         const wy = levels[lz] + 0.11;
         const wz = (3 - ly) - 3.5;
@@ -570,8 +622,23 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 '0,1,1->0,1,0': '0,0,1',              
                 '0,1,1->0,0,1': '0,1,0',              
               };
+              // optional mapping from king-move key to the correct rook-from coords to avoid selecting wrong rook
+              const rookFromMapLocal = {
+                // queenBlockMap entries -> preferred rook-from positions
+                '0,1,1->0,3,1': '0,0,3',
+                '0,1,1->0,1,3': '0,3,0',
+                '0,2,2->0,0,2': '0,3,0',
+                '0,2,2->0,2,0': '0,0,3',
+                // kingBlockMap entries -> preferred rook-from positions
+                '0,2,2->0,3,2': '0,3,3',
+                '0,2,2->0,2,3': '0,3,3',
+                '0,1,1->0,1,0': '0,0,0',
+                '0,1,1->0,0,1': '0,0,0',
+              };
               // Merge with the global KING_BLOCK_MAP so generation and execution-time checks align
               const effectiveKingBlockMap = { ...(typeof KING_BLOCK_MAP === 'object' ? KING_BLOCK_MAP : {}), ...kingBlockMap };
+              // merged rook-from map so generation can prefer explicit rook positions when provided
+              const effectiveRookFromMap = { ...(typeof ROOK_FROM_MAP === 'object' ? ROOK_FROM_MAP : {}), ...rookFromMapLocal };
 
               const pathClearFrom = (rxx, ryy, rzz, order, targetYParam = sy, targetZParam = sz) => {
                 let cx = rxx, cy = ryy, cz = rzz;
@@ -599,202 +666,174 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 return true;
               };
 
-              for (const rook of rooks) {
-                if (rook.hasMoved) continue;
-                const rx = rook.x, ry = rook.y, rz = rook.z;
-                const candidateLandings = [];
-                if (ry !== sy) candidateLandings.push({ x: sx, y: sy + Math.sign(ry - sy), z: sz, axis: 'y' });
-                if (rz !== sz) candidateLandings.push({ x: sx, y: sy, z: sz + Math.sign(rz - sz), axis: 'z' });
+              // compute candidate landings (neighbors in Y/Z) once and evaluate each
+              const candidateLandings = [];
+              const potential = [ { x: sx, y: sy + 1, z: sz, axis: 'y' }, { x: sx, y: sy - 1, z: sz, axis: 'y' }, { x: sx, y: sy, z: sz + 1, axis: 'z' }, { x: sx, y: sy, z: sz - 1, axis: 'z' } ];
+              for (const c of potential) {
+                if (!inBounds(c.x, c.y, c.z)) continue;
+                // only consider landings that actually move king one step in axis
+                candidateLandings.push(c);
+              }
 
-                for (const landing of candidateLandings) {
-                  const landingKey = `${landing.x},${landing.y},${landing.z}`;
-                  if (occupiedMap.has(landingKey)) continue;
-                  if (isSquareAttacked(allPieces, sx, sy, sz, enemy)) continue;
-                  if (isSquareAttacked(allPieces, landing.x, landing.y, landing.z, enemy)) continue;
+              for (const landing of candidateLandings) {
+                const landingKey = `${landing.x},${landing.y},${landing.z}`;
+                if (occupiedMap.has(landingKey)) continue;
+                if (isSquareAttacked(allPieces, sx, sy, sz, enemy)) continue;
+                if (isSquareAttacked(allPieces, landing.x, landing.y, landing.z, enemy)) continue;
 
-                  // stricter king-side checks: ensure king path squares are empty & not attacked,
-                  // rook path to its destination is clear, and rook can reach rookTo via pathClearFrom.
-                  // kingLanding is `landing` for king-side.
-                  const kingLanding = landing;
+                // helper to compute between-exclusive coords from A to B
+                const betweenExclusiveLocal = (A, B) => {
+                  const res = [];
+                  const dx = Math.sign(B.x - A.x);
+                  const dy = Math.sign(B.y - A.y);
+                  const dz = Math.sign(B.z - A.z);
+                  let cx = A.x + dx, cy = A.y + dy, cz = A.z + dz;
+                  while (!(cx === B.x && cy === B.y && cz === B.z)) {
+                    res.push(`${cx},${cy},${cz}`);
+                    cx += dx; cy += dy; cz += dz;
+                    if (res.length > 20) break;
+                  }
+                  return res;
+                };
 
-                  // helper to compute between-exclusive coords from A to B
-                  const betweenExclusiveLocal = (A, B) => {
-                    const res = [];
-                    const dx = Math.sign(B.x - A.x);
-                    const dy = Math.sign(B.y - A.y);
-                    const dz = Math.sign(B.z - A.z);
+                // ensure king path between start and landing is empty and not attacked
+                let kingPathOk = true;
+                try {
+                  const kMapKey = `${sx},${sy},${sz}->${landing.x},${landing.y},${landing.z}`;
+                  let kMapped = effectiveKingBlockMap[kMapKey];
+                  if (!kMapped && friendly === 'white') {
+                    const mirror = (s) => { const [ax, ay, az] = s.split(',').map(Number); return `${7 - ax},${ay},${az}`; };
+                    const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${landing.x},${landing.y},${landing.z}`)}`;
+                    const mappedMirrored = effectiveKingBlockMap[mirroredKey];
+                    if (mappedMirrored) kMapped = mirror(mappedMirrored);
+                  }
+                  try { console.debug('kingBlockMap check', { kMapKey, kMapped, occupied: kMapped ? occupiedMap.get(kMapped) : null }); } catch (e) {}
+                  if (kMapped && occupiedMap.get(kMapped)) { kingPathOk = false; }
+                } catch (e) {}
+
+                const kingBetweenLocal = betweenExclusiveLocal({ x: sx, y: sy, z: sz }, landing);
+                for (const sq of kingBetweenLocal) {
+                  if (occupiedMap.has(sq)) { kingPathOk = false; break; }
+                  const [kx, ky, kz] = sq.split(',').map(Number);
+                  if (isSquareAttacked(allPieces, kx, ky, kz, enemy)) { kingPathOk = false; break; }
+                }
+                if (!kingPathOk) continue;
+
+                // decide which rook to consider for this landing: prefer explicit mapping
+                const mapKey = `${sx},${sy},${sz}->${landing.x},${landing.y},${landing.z}`;
+                let mapped = effectiveRookFromMap[mapKey];
+                if (!mapped && friendly === 'white') {
+                  const mirror = (s) => { const [ax, ay, az] = s.split(',').map(Number); return `${7 - ax},${ay},${az}`; };
+                  const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${landing.x},${landing.y},${landing.z}`)}`;
+                  const mappedMirrored = effectiveRookFromMap[mirroredKey];
+                  if (mappedMirrored) mapped = mirror(mappedMirrored);
+                }
+
+                let rookCandidates = [];
+                if (mapped) {
+                  const [mrx, mry, mrz] = mapped.split(',').map(Number);
+                  const found = allPieces.find(p => p.t === 'R' && p.color === friendly && p.x === mrx && p.y === mry && p.z === mrz && !p.hasMoved);
+                  if (found) {
+                    rookCandidates.push({ rook: found, rx: found.x, ry: found.y, rz: found.z });
+                    try { console.debug('using rookFromMap mapping for castle', { mapKey, mapped }); } catch (e) {}
+                  } else {
+                    try { console.debug('mapped rook not present at mapped coords', { mapKey, mapped }); } catch (e) {}
+                  }
+                } else {
+                  // fallback: find any rook in the same file (x) that could be a candidate (prefer closest in axis direction)
+                  const candidates = allPieces.filter(p => p.t === 'R' && p.color === friendly && p.x === sx && !p.hasMoved);
+                  if (candidates && candidates.length) {
+                    // prefer rook on same axis direction as landing
+                    const dir = landing.axis === 'y' ? Math.sign(landing.y - sy) : Math.sign(landing.z - sz);
+                    const filtered = candidates.filter(p => {
+                      if (landing.axis === 'y') return Math.sign(p.y - sy) === dir;
+                      return Math.sign(p.z - sz) === dir;
+                    });
+                    const pick = (filtered.length ? filtered[0] : candidates[0]);
+                    rookCandidates.push({ rook: pick, rx: pick.x, ry: pick.y, rz: pick.z });
+                  }
+                }
+
+                // process each selected rook candidate for this landing
+                for (const ri of rookCandidates) {
+                  const rook = ri.rook; const rx = ri.rx; const ry = ri.ry; const rz = ri.rz;
+                  // compute rookTo for king-side (king moves toward rook)
+                  const rookTo = { x: sx, y: sy, z: sz };
+                  const rookBetweenLocal = betweenExclusiveLocal({ x: rx, y: ry, z: rz }, rookTo);
+                  let rookPathClearLocal = true;
+                  for (const sq of rookBetweenLocal) { if (occupiedMap.has(sq)) { rookPathClearLocal = false; break; } }
+                  if (!rookPathClearLocal) continue;
+                  const okRookPathLocal = pathClearFrom(rx, ry, rz, ['y','z'], rookTo.y, rookTo.z) || pathClearFrom(rx, ry, rz, ['z','y'], rookTo.y, rookTo.z);
+                  if (!okRookPathLocal) continue;
+                  const neighbors = [[sx+1,sy,sz],[sx-1,sy,sz],[sx,sy+1,sz],[sx,sy-1,sz],[sx,sy,sz+1],[sx,sy,sz-1]];
+                  let neighborBlocked = false;
+                  for (const [nx,ny,nz] of neighbors) {
+                    const k = `${nx},${ny},${nz}`;
+                    if (nx < 0 || nx > 7 || ny < 0 || ny > 3 || nz < 0 || nz > 3) continue;
+                    if (k === `${rx},${ry},${rz}`) continue;
+                    if (k === `${landing.x},${landing.y},${landing.z}`) continue;
+                    if (occupiedMap.has(k)) { neighborBlocked = true; try { console.debug('king-side neighbor blocked', { k, rook: `${rx},${ry},${rz}`, kingLanding: landing }); } catch (e) {} break; }
+                  }
+                  if (neighborBlocked) continue;
+                  const mappedBlock = lookupKingBlock(sx, sy, sz, landing.x, landing.y, landing.z, effectiveKingBlockMap, friendly);
+                  if (mappedBlock && occupiedMap && occupiedMap.has(mappedBlock)) continue;
+
+                  const castleCand = { x: landing.x, y: landing.y, z: landing.z, castle: { type: 'king', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } };
+                  try {
+                    if (typeof isCastleStillLegal === 'function') {
+                      if (!isCastleStillLegal(sel.id, castleCand.castle, allPieces)) {
+                        try { console.debug('king-side candidate rejected by isCastleStillLegal at generation', { sel: [sx,sy,sz], landing, rook: [rx,ry,rz] }); } catch (e) {}
+                      } else { moves.push(castleCand); try { console.debug('king-side castle candidate added', { sx, sy, sz, landing, rook: [rx,ry,rz], rookTo }); } catch (e) {} }
+                    } else { moves.push(castleCand); try { console.debug('king-side castle candidate added (no runtime check)', { sx, sy, sz, landing, rook: [rx,ry,rz], rookTo }); } catch (e) {} }
+                  } catch (e) { moves.push(castleCand); }
+                }
+
+                // unified queen-side handling (both Y and Z axis cases) — process using any rook candidate (rx/ry/rz of first candidate)
+                const ri0 = (rookCandidates && rookCandidates.length) ? rookCandidates[0] : null;
+                if (!ri0) continue;
+                const rx0 = ri0.rx, ry0 = ri0.ry, rz0 = ri0.rz;
+                if (landing.axis === 'y' || landing.axis === 'z') {
+                  const kingLanding = landing.axis === 'y' ? { x: sx, y: ry0, z: sz } : { x: sx, y: sy, z: rz0 };
+                  const mapKeyQ = `${sx},${sy},${sz}->${kingLanding.x},${kingLanding.y},${kingLanding.z}`;
+                  let mappedQ = queenBlockMap[mapKeyQ];
+                  if (!mappedQ && friendly === 'white') {
+                    const mirror = (s) => { const [ax, ay, az] = s.split(',').map(Number); return `${7 - ax},${ay},${az}`; };
+                    const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${kingLanding.x},${kingLanding.y},${kingLanding.z}`)}`;
+                    const mappedMirrored = queenBlockMap[mirroredKey];
+                    if (mappedMirrored) mappedQ = mirror(mappedMirrored);
+                    try { console.debug('queenBlockMap mirrored lookup', { mirroredKey, mappedMirrored, mappedQ }); } catch (e) {}
+                  }
+                  try { console.debug('queenBlockMap check unified', { mapKey: mapKeyQ, mapped: mappedQ, occupied: occupiedMap.get(mappedQ) }); } catch (e) {}
+                  if (mappedQ && occupiedMap.get(mappedQ)) continue;
+
+                  const betweenExclusive = (A, B) => {
+                    const res = []; const dx = Math.sign(B.x - A.x); const dy = Math.sign(B.y - A.y); const dz = Math.sign(B.z - A.z);
                     let cx = A.x + dx, cy = A.y + dy, cz = A.z + dz;
-                    while (!(cx === B.x && cy === B.y && cz === B.z)) {
-                      res.push(`${cx},${cy},${cz}`);
-                      cx += dx; cy += dy; cz += dz;
-                      if (res.length > 20) break;
-                    }
+                    while (!(cx === B.x && cy === B.y && cz === B.z)) { res.push(`${cx},${cy},${cz}`); cx += dx; cy += dy; cz += dz; if (res.length > 20) break; }
                     return res;
                   };
 
-                  // ensure king path between start and landing is empty and not attacked
-                  let kingPathOk = true;
-                  // check explicit king-side block map (avoid offering castle if mapped blocking square occupied)
-                    try {
-                    const kMapKey = `${sx},${sy},${sz}->${kingLanding.x},${kingLanding.y},${kingLanding.z}`;
-                    let kMapped = effectiveKingBlockMap[kMapKey];
-                    if (!kMapped && friendly === 'white') {
-                      const mirror = (s) => {
-                        const [ax, ay, az] = s.split(',').map(Number);
-                        return `${7 - ax},${ay},${az}`;
-                      };
-                      const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${kingLanding.x},${kingLanding.y},${kingLanding.z}`)}`;
-                      const mappedMirrored = effectiveKingBlockMap[mirroredKey];
-                      if (mappedMirrored) kMapped = mirror(mappedMirrored);
-                    }
-                    try { console.debug('kingBlockMap check', { kMapKey, kMapped, occupied: kMapped ? occupiedMap.get(kMapped) : null }); } catch (e) {}
-                    if (kMapped && occupiedMap.get(kMapped)) {
-                      // blocked by explicit king-side blocker
-                      kingPathOk = false;
-                    }
-                  } catch (e) {}
+                  const kingBetween = betweenExclusive({ x: sx, y: sy, z: sz }, kingLanding);
+                  let kingPathClear = true;
+                  for (const sq of kingBetween) { if (occupiedMap.has(sq)) { kingPathClear = false; break; } const [kx, ky, kz] = sq.split(',').map(Number); if (isSquareAttacked(allPieces, kx, ky, kz, enemy)) { kingPathClear = false; break; } }
+                  if (!kingPathClear) continue;
 
-                  const kingBetweenLocal = betweenExclusiveLocal({ x: sx, y: sy, z: sz }, kingLanding);
-                  for (const sq of kingBetweenLocal) {
-                    if (occupiedMap.has(sq)) { kingPathOk = false; break; }
-                    const [kx, ky, kz] = sq.split(',').map(Number);
-                    if (isSquareAttacked(allPieces, kx, ky, kz, enemy)) { kingPathOk = false; break; }
-                  }
-                  if (!kingPathOk) {
-                    // king cannot castle along this landing
-                  } else {
-                    // compute rookTo: rook moves to the king's original square for king-side
-                    const rookTo = { x: sx, y: sy, z: sz };
-                    // ensure rook path from rook -> rookTo is clear (exclusive)
-                    const rookBetweenLocal = betweenExclusiveLocal({ x: rx, y: ry, z: rz }, rookTo);
-                    let rookPathClearLocal = true;
-                    for (const sq of rookBetweenLocal) {
-                      if (occupiedMap.has(sq)) { rookPathClearLocal = false; break; }
-                    }
-                    if (rookPathClearLocal) {
-                      const okRookPathLocal = pathClearFrom(rx, ry, rz, ['y','z'], rookTo.y, rookTo.z) || pathClearFrom(rx, ry, rz, ['z','y'], rookTo.y, rookTo.z);
-                      if (okRookPathLocal) {
-                        // extra safety: block if any immediate neighbor of king origin is occupied (known blocking cases)
-                        const neighbors = [[sx+1,sy,sz],[sx-1,sy,sz],[sx,sy+1,sz],[sx,sy-1,sz],[sx,sy,sz+1],[sx,sy,sz-1]];
-                        let neighborBlocked = false;
-                        for (const [nx,ny,nz] of neighbors) {
-                          const k = `${nx},${ny},${nz}`;
-                          if (nx < 0 || nx > 7 || ny < 0 || ny > 3 || nz < 0 || nz > 3) continue;
-                          // ignore the rook's square and the kingLanding
-                          if (k === `${rx},${ry},${rz}`) continue;
-                          if (k === `${kingLanding.x},${kingLanding.y},${kingLanding.z}`) continue;
-                          if (occupiedMap.has(k)) { neighborBlocked = true; try { console.debug('king-side neighbor blocked', { k, rook: `${rx},${ry},${rz}`, kingLanding }); } catch (e) {} break; }
-                        }
-                        if (!neighborBlocked) {
-                          // simple blocking rule: consult king-block map and ensure mapped square is empty
-                          const mapped = lookupKingBlock(sx, sy, sz, kingLanding.x, kingLanding.y, kingLanding.z, effectiveKingBlockMap, friendly);
-                          if (mapped && occupiedMap && occupiedMap.has(mapped)) {
-                            try { console.debug('king-side candidate blocked by KING_BLOCK_MAP at generation', { from: [sx,sy,sz], landing: kingLanding, mapped }); } catch (e) {}
-                          } else {
-                            const castleCand = { x: landing.x, y: landing.y, z: landing.z, castle: { type: 'king', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } };
-                            try {
-                              if (typeof isCastleStillLegal === 'function') {
-                                if (!isCastleStillLegal(sel.id, castleCand.castle, allPieces)) {
-                                  try { console.debug('king-side candidate rejected by isCastleStillLegal at generation', { sel: [sx,sy,sz], landing, rook: [rx,ry,rz] }); } catch (e) {}
-                                } else {
-                                  moves.push(castleCand);
-                                  try { console.debug('king-side castle candidate added', { sx, sy, sz, landing, rook: { rx, ry, rz }, rookTo }); } catch (e) {}
-                                }
-                              } else {
-                                moves.push(castleCand);
-                                try { console.debug('king-side castle candidate added (no runtime check)', { sx, sy, sz, landing, rook: { rx, ry, rz }, rookTo }); } catch (e) {}
-                              }
-                            } catch (e) {
-                              // fallback: add candidate if check threw
-                              moves.push({ x: landing.x, y: landing.y, z: landing.z, castle: { type: 'king', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } });
-                            }
-                          }
-                        } else {
-                          try { console.debug('king-side castle blocked by neighbor', { sx, sy, sz, landing, rook: { rx, ry, rz }, rookTo }); } catch (e) {}
-                        }
-                      }
-                    }
-                  }
-
-                  // unified queen-side handling (both Y and Z axis cases)
-                  if (landing.axis === 'y' || landing.axis === 'z') {
-                    const kingLanding = landing.axis === 'y' ? { x: sx, y: ry, z: sz } : { x: sx, y: sy, z: rz };
-                    const mapKey = `${sx},${sy},${sz}->${kingLanding.x},${kingLanding.y},${kingLanding.z}`;
-                    let mapped = queenBlockMap[mapKey];
-                    // If not found and this is the white side, try mirrored lookup (mirror X across board)
-                    if (!mapped && friendly === 'white') {
-                      const mirror = (s) => {
-                        const [ax, ay, az] = s.split(',').map(Number);
-                        return `${7 - ax},${ay},${az}`;
-                      };
-                      const mirroredKey = `${mirror(`${sx},${sy},${sz}`)}->${mirror(`${kingLanding.x},${kingLanding.y},${kingLanding.z}`)}`;
-                      const mappedMirrored = queenBlockMap[mirroredKey];
-                      if (mappedMirrored) mapped = mirror(mappedMirrored);
-                      try { console.debug('queenBlockMap mirrored lookup', { mirroredKey, mappedMirrored, mapped }); } catch (e) {}
-                    }
-                    try { console.debug('queenBlockMap check unified', { mapKey, mapped, occupied: occupiedMap.get(mapped) }); } catch (e) {}
-                    if (mapped && occupiedMap.get(mapped)) continue;
-
-                    // helper: return array of coord-strings strictly between A (exclusive) and B (exclusive)
-                    const betweenExclusive = (A, B) => {
-                      const res = [];
-                      const dx = Math.sign(B.x - A.x);
-                      const dy = Math.sign(B.y - A.y);
-                      const dz = Math.sign(B.z - A.z);
-                      let cx = A.x + dx, cy = A.y + dy, cz = A.z + dz;
-                      while (!(cx === B.x && cy === B.y && cz === B.z)) {
-                        res.push(`${cx},${cy},${cz}`);
-                        cx += dx; cy += dy; cz += dz;
-                        // safety: avoid infinite loop
-                        if (res.length > 20) break;
-                      }
-                      return res;
-                    };
-
-                    // ensure king path (squares between start and landing) are empty and not attacked
-                    const kingBetween = betweenExclusive({ x: sx, y: sy, z: sz }, kingLanding);
-                    let kingPathClear = true;
-                    for (const sq of kingBetween) {
-                      if (occupiedMap.has(sq)) { kingPathClear = false; break; }
-                      const [kx, ky, kz] = sq.split(',').map(Number);
-                      if (isSquareAttacked(allPieces, kx, ky, kz, enemy)) { kingPathClear = false; break; }
-                    }
-                    if (!kingPathClear) continue;
-
-                    // ensure rook path from rook -> rookTo is clear (exclusive)
-                    const rookTo = landing.axis === 'y' ? { x: sx, y: sy + Math.sign(ry - sy), z: sz } : { x: sx, y: sy, z: sz + Math.sign(rz - sz) };
-                    const rookBetween = betweenExclusive({ x: rx, y: ry, z: rz }, rookTo);
-                    let rookPathClear = true;
-                    for (const sq of rookBetween) {
-                      if (occupiedMap.has(sq)) { rookPathClear = false; break; }
-                    }
-                    if (!rookPathClear) continue;
-
-                    // additional safety: verify rook can reach rookTo via our existing pathClearFrom fallback
-                    const okRookPath = pathClearFrom(rx, ry, rz, ['y','z'], rookTo.y, rookTo.z) || pathClearFrom(rx, ry, rz, ['z','y'], rookTo.y, rookTo.z);
-                    if (!okRookPath) continue;
-
-                    // apply simple king-block rule for queen-side too
-                    const mappedQ = lookupKingBlock(sx, sy, sz, kingLanding.x, kingLanding.y, kingLanding.z, effectiveKingBlockMap, friendly);
-                    if (mappedQ && occupiedMap && occupiedMap.has(mappedQ)) {
-                      try { console.debug('queen-side candidate blocked by KING_BLOCK_MAP at generation', { from: [sx,sy,sz], kingLanding, mapped: mappedQ }); } catch (e) {}
-                    } else {
-                      const castleCandQ = { x: kingLanding.x, y: kingLanding.y, z: kingLanding.z, castle: { type: 'queen', rookId: rook.id, rookFrom: { x: rx, y: ry, z: rz }, rookTo } };
-                      try {
-                        if (typeof isCastleStillLegal === 'function') {
-                          if (!isCastleStillLegal(sel.id, castleCandQ.castle, allPieces)) {
-                            try { console.debug('queen-side candidate rejected by isCastleStillLegal at generation', { sel: [sx,sy,sz], kingLanding, rook: [rx,ry,rz] }); } catch (e) {}
-                          } else {
-                            moves.push(castleCandQ);
-                          }
-                        } else {
-                          moves.push(castleCandQ);
-                        }
-                      } catch (e) {
-                        moves.push(castleCandQ);
-                      }
-                    }
-                  }
+                  const rookTo = landing.axis === 'y' ? { x: sx, y: sy + Math.sign(ry0 - sy), z: sz } : { x: sx, y: sy, z: sz + Math.sign(rz0 - sz) };
+                  const rookBetween = betweenExclusive({ x: rx0, y: ry0, z: rz0 }, rookTo);
+                  let rookPathClear = true;
+                  for (const sq of rookBetween) { if (occupiedMap.has(sq)) { rookPathClear = false; break; } }
+                  if (!rookPathClear) continue;
+                  const okRookPath = pathClearFrom(rx0, ry0, rz0, ['y','z'], rookTo.y, rookTo.z) || pathClearFrom(rx0, ry0, rz0, ['z','y'], rookTo.y, rookTo.z);
+                  if (!okRookPath) continue;
+                  const mappedQBlock = lookupKingBlock(sx, sy, sz, kingLanding.x, kingLanding.y, kingLanding.z, effectiveKingBlockMap, friendly);
+                  if (mappedQBlock && occupiedMap && occupiedMap.has(mappedQBlock)) continue;
+                  const castleCandQ = { x: kingLanding.x, y: kingLanding.y, z: kingLanding.z, castle: { type: 'queen', rookId: ri0.rook.id, rookFrom: { x: rx0, y: ry0, z: rz0 }, rookTo } };
+                  try {
+                    if (typeof isCastleStillLegal === 'function') {
+                      if (!isCastleStillLegal(sel.id, castleCandQ.castle, allPieces)) { try { console.debug('queen-side candidate rejected by isCastleStillLegal at generation', { sel: [sx,sy,sz], kingLanding, rook: [rx0,ry0,rz0] }); } catch (e) {} }
+                      else { moves.push(castleCandQ); }
+                    } else { moves.push(castleCandQ); }
+                  } catch (e) { moves.push(castleCandQ); }
                 }
               }
             }
@@ -952,7 +991,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             <primitive
               object={(clones && clones[`${p.t}-${isWhite ? 'white' : '#615c5c'}`]) ? clones[`${p.t}-${isWhite ? 'white' : '#615c5c'}`].clone(true) : cloneAndColor(gltf, isWhite ? '#ffffff' : '#615c5c')}
               scale={s}
-              rotation={(p.color === currentTurn) ? [0, Math.PI, 0] : [0, 0, 0]}
+              rotation={(aiSide) ? [0, 0, 0] : ((p.color === currentTurn) ? [0, Math.PI, 0] : [0, 0, 0])}
             />
           </group>
         );
@@ -968,80 +1007,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         return `${level}${file}${rank}`;
       };
 
-      const generateMoveNotation = (mover, target, pieces) => {
-        if (!mover) return '';
-        // helper: map coords for notation only. Keep game coords untouched.
-        const mapCoordForNotation = (c, color) => {
-          if (!c) return c;
-          const ix = (typeof c.x === 'number') ? c.x : 0;
-          const iy = (typeof c.y === 'number') ? c.y : 0;
-          const iz = (typeof c.z === 'number') ? c.z : 0;
-          //if (color === 'black') return { x: 7 - ix, y: iy, z: iz };
-          return { x: ix, y: iy, z: iz };
-        };
-
-        try {
-          try { console.debug('generateMoveNotation inputs', { mover, target, piecesCount: pieces && pieces.length }); } catch (e) {}
-        } catch (e) {}
-
-        if (target && target.castle) {
-          const startLevel = mover.z + 1;
-          const endLevel = (target.castle && target.castle.rookTo) ? target.castle.rookTo.z + 1 : (target.z != null ? target.z + 1 : mover.z + 1);
-          const o = target.castle.type === 'queen' ? 'O-O-O' : 'O-O';
-          return `${startLevel}${o}${endLevel}`;
-        }
-        const piece = mover.t;
-        const letter = piece === 'p' ? '' : piece;
-        const mappedTarget = mapCoordForNotation(target || {}, mover.color);
-        const mappedOrigin = mapCoordForNotation(mover, mover.color);
-        const targetNotation = squareToNotation(mappedTarget || {});
-        try {
-          // also produce a simulated board after the move to inspect actual moved coords
-          const simulated = simulateMove(pieces || [], mover.id, target || {});
-          const moved = simulated.find(s => s.id === mover.id) || null;
-          try { console.debug('generateMoveNotation mapped', { mappedTarget, targetNotation, mappedOrigin, simulatedMoved: moved }); } catch (e) {}
-        } catch (e) { console.debug('simulateMove in notation err', e); }
-
-        // detect capture: explicit en-passant or an enemy occupying the target square
-        const isCapture = !!( (target && target.enPassant) || (pieces && pieces.find(p => p.x === (target && target.x) && p.y === (target && target.y) && p.z === (target && target.z) && p.color !== mover.color)) );
-
-        // Pawn notation: file of origin, include level if ambiguous (two pawns on same file could capture)
-        if (piece === 'p') {
-          if (!isCapture) return targetNotation;
-          const originFile = String.fromCharCode('a'.charCodeAt(0) + (mappedOrigin.y || 0));
-          // find other pawns on same file that can also capture this target
-          let ambiguousLevel = false;
-          if (pieces && pieces.length) {
-            for (const p of pieces) {
-              if (p.id === mover.id) continue;
-              if (p.t !== 'p' || p.color !== mover.color) continue;
-              if (p.y !== mover.y) continue; // same file (game coords)
-              if (canPieceMoveTo(p, target.x, target.y, target.z, pieces)) { ambiguousLevel = true; break; }
-            }
-          }
-          if (ambiguousLevel) {
-            const levelPrefix = (mappedOrigin.z != null ? (mappedOrigin.z + 1) : 1);
-            return `${levelPrefix}${originFile}x${targetNotation}`;
-          }
-          return `${originFile}x${targetNotation}`;
-        }
-
-        // Non-pawn pieces
-        let ambiguous = false;
-        if (letter !== '') {
-          for (const p of pieces) {
-            if (p.id === mover.id) continue;
-            if (p.t !== mover.t) continue;
-            if (p.color !== mover.color) continue;
-            if (canPieceMoveTo(p, target.x, target.y, target.z, pieces)) { ambiguous = true; break; }
-          }
-        }
-        if (!ambiguous) return `${letter}${isCapture ? 'x' : ''}${targetNotation}`;
-        const origin = squareToNotation(mappedOrigin || {});
-        return `${letter}(${origin})${isCapture ? 'x' : ''}${targetNotation}`;
-      };
-
-      const moveLockRef = useRef(false);
+      
 
       // verify castling is still legal at execution time (defensive check)
       const isCastleStillLegal = (moverId, castleObj, piecesArr) => {
@@ -1050,15 +1016,16 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const mover = piecesArr.find(p => p.id === moverId);
           if (!mover) return false;
           if (mover.hasMoved) return false;
-          const rook = piecesArr.find(p => p.id === castleObj.rookId);
+          const sx = mover.x, sy = mover.y, sz = mover.z;
+          // kingLanding from castleObj (when king-side we stored landing as kingTo)
+          const kLand = castleObj.kingTo || { x: mover.x, y: mover.y, z: mover.z };
+
+          const rook = piecesArr.find(p => p.id === castleObj.rookId);  // this is just finding a rook.  but it needs to find the right rook...
           if (!rook) return false;
           if (rook.hasMoved) return false;
-          const sx = mover.x, sy = mover.y, sz = mover.z;
           const rx = rook.x, ry = rook.y, rz = rook.z;
           const enemy = mover.color === 'white' ? 'black' : 'white';
           const occupiedMapLocal = new Map((piecesArr || []).map(p => [`${p.x},${p.y},${p.z}`, p]));
-          // kingLanding from castleObj (when king-side we stored landing as kingTo)
-          const kLand = castleObj.kingTo || { x: mover.x, y: mover.y, z: mover.z };
           // check explicit king-block map
           try {
             const mapped = lookupKingBlock(sx, sy, sz, kLand.x, kLand.y, kLand.z, null, mover.color);
@@ -1128,6 +1095,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const _doMove = useCallback((finalTarget) => {
         if (moveLockRef.current) return;
         moveLockRef.current = true;
+        try { (typeof pushStateSnapshot !== 'undefined') && pushStateSnapshot(); } catch (e) {}
         let moverBefore = null;
         try {
         if (finalTarget && finalTarget.castle) {
@@ -1202,29 +1170,22 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         });
         // record notation into moveHistory (use moverBefore.color for which side moved)
         try {
-          if (notation && typeof setMoveHistory === 'function') {
-            const side = moverBefore ? moverBefore.color : null;
-            try { console.debug('recording notation', { notation, side }); } catch (e) {}
+          const side = moverBefore ? moverBefore.color : null;
+          let finalNotation = notation;
+          if (!finalNotation) {
+            try { finalNotation = `${squareToNotation(moverBefore || {})}-${squareToNotation(finalTarget || {})}`; } catch (e) { finalNotation = ''; }
+          }
+          if (finalNotation && typeof setMoveHistory === 'function') {
+            try { console.debug('recording notation', { notation: finalNotation, side }); } catch (e) {}
             setMoveHistory(prev => {
               const copy = prev ? prev.slice() : [];
               if (side === 'white') {
                 const last = copy.length ? copy[copy.length - 1] : null;
-                if (last && last.white === notation) {
-                  try { console.debug('skipping duplicate white notation', notation); } catch (e) {}
-                  return copy;
-                }
-                copy.push({ white: notation, black: null });
+                if (last && last.white === finalNotation) return copy;
+                copy.push({ white: finalNotation, black: null });
               } else if (side === 'black') {
-                if (copy.length === 0) {
-                  copy.push({ white: null, black: notation });
-                } else {
-                  const last = copy[copy.length - 1];
-                  if (last && last.black === notation) {
-                    try { console.debug('skipping duplicate black notation', notation); } catch (e) {}
-                    return copy;
-                  }
-                  copy[copy.length - 1] = { ...copy[copy.length - 1], black: notation };
-                }
+                if (copy.length === 0) copy.push({ white: null, black: finalNotation });
+                else copy[copy.length - 1] = { ...copy[copy.length - 1], black: finalNotation };
               }
               try { console.debug('moveHistory now', copy); } catch (e) {}
               return copy;
@@ -1240,8 +1201,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           });
         } catch (e) {}
         } finally {
-          // release move lock after move application
-          try { moveLockRef.current = false; } catch (e) {}
+          // release move lock after move application (small delay to avoid immediate re-entrancy)
+          try { setTimeout(() => { try { moveLockRef.current = false; } catch (e) {} }, 60); } catch (e) { try { moveLockRef.current = false; } catch (e) {} }
         }
         try {
           if (moverBefore && moverBefore.t === 'p') {
@@ -1256,7 +1217,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             try { if (setLastMove) { setLastMove(null); try { console.log('lastMove cleared'); } catch (e) {} } } catch (e) {}
           }
         } catch (e) {}
-      }, [selectedPieceId, piecesState, setPiecesState, setSelectedPieceId, setCurrentTurn, setLastMove, setMoveHistory, generateMoveNotation, squareToNotation]);
+      }, [selectedPieceId, piecesState, setPiecesState, setSelectedPieceId, setCurrentTurn, setLastMove, setMoveHistory, generateMoveNotation, squareToNotation, pushStateSnapshot]);
 
       // wrapper to prompt or execute
       const moveTo = useCallback((target) => {
@@ -1354,6 +1315,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         setDragPointWorld(null);
         setPointerActive(false);
       }, [pendingDrop, controlsRef, groupRef, /*legalMoves*/ legalMoves, moveTo, pointerDownRef, selectedPieceId, setDragPointWorld, setIsDragging, setPendingDrop, setPointerActive, setSelectedPieceId]);
+
+      
 
       const indicators = legalMoves.map((m, i) => {
         // default indicator position is landing square
@@ -1453,6 +1416,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [aiSide, setAiSide] = useState(null);
       const [selectedPieceId, setSelectedPieceId] = useState(null);
       const [moveHistory, setMoveHistory] = useState([]); // array of { white: string|null, black: string|null }
+      const [canvasKey, setCanvasKey] = useState(0);
+      useEffect(() => {
+        try { console.debug('canvasKey changed ->', canvasKey); } catch (e) {}
+      }, [canvasKey]);
+      const [gameStarted, setGameStarted] = useState(false);
       const [isDragging, setIsDragging] = useState(false);
       const [dragPoint, setDragPoint] = useState([0, 0, 0]);
       const [dragHeight, setDragHeight] = useState(0);
@@ -1480,6 +1448,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
       // build a cache of normalized clones per piece type + color so ghost and piece share same object
       const clones = useMemo(() => {
+        try { console.debug('recomputing clones cache'); } catch (e) {}
         const map = {};
         const modelMap = { R: rookGltf, N: knightGltf, B: bishopGltf, K: kingGltf, Q: queenGltf, p: pawnGltf };
         ['white','#615c5c'].forEach((colorHex) => {
@@ -1537,7 +1506,1149 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       }
 
       const [piecesState, setPiecesState] = useState(() => getInitialPieces());
+      // lightweight in-memory/localStorage debug event buffer for easier log collection
+      const debugEventsRef = useRef([]);
+      const pushDebug = useCallback((tag, payload) => {
+        try {
+          const ev = { t: Date.now(), tag, payload };
+          debugEventsRef.current.push(ev);
+          if (debugEventsRef.current.length > 200) debugEventsRef.current.shift();
+          try { localStorage.setItem('chess3d:debugEvents', JSON.stringify(debugEventsRef.current.slice(-200))); } catch (e) {}
+          try { window.__chess3d_debug = debugEventsRef.current.slice(-200); } catch (e) {}
+          try { console.log('pushDebug', tag, payload); } catch (e) {}
+        } catch (e) {}
+      }, []);
+      // reset game to initial position
+      const resetGame = () => {
+        try {
+          setPiecesState(getInitialPieces());
+          setMoveHistory([]);
+          setCurrentTurn('white');
+          setLastMove(null);
+          setAiSide(null);
+          setSelectedPieceId(null);
+          setGameOver(false);
+          setGameWinner(null);
+          setStatusMessage('');
+        } catch (e) { console.debug('resetGame error', e); }
+      };
       const prevPiecesRef = useRef(piecesState);
+      const prevMoveHistoryRef = useRef(moveHistory);
+      const statesHistoryRef = useRef([]); // stack of previous full states for take-back
+
+      // push a shallow snapshot of the full app state for take-back
+      const pushStateSnapshot = useCallback(() => {
+        try {
+          // use the current live state values (not prev refs) to avoid missing snapshots
+          const snap = {
+            piecesState: (piecesState || []).map(p => ({ ...p })),
+            moveHistory: (moveHistory || []).slice(),
+            currentTurn,
+            lastMove,
+            aiSide,
+            gameStarted,
+          };
+          statesHistoryRef.current.push(snap);
+          try { console.debug('pushed state snapshot (take-back depth)', statesHistoryRef.current.length); } catch (e) {}
+          try { if (typeof pushDebug === 'function') pushDebug('pushedSnapshot', { depth: statesHistoryRef.current.length }); } catch (e) {}
+        } catch (e) { console.debug('pushStateSnapshot failed', e); }
+      }, [piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted]);
+
+      useEffect(() => { prevMoveHistoryRef.current = moveHistory; }, [moveHistory]);
+
+      // notation helper (app-wide): convert internal coords to human-readable notation
+      const squareToNotation = ({ x, y, z } = {}) => {
+        const ix = (typeof x === 'number') ? x : 0;
+        const iy = (typeof y === 'number') ? y : 0;
+        const iz = (typeof z === 'number') ? z : 0;
+        const level = iz + 1;
+        const file = String.fromCharCode('a'.charCodeAt(0) + iy);
+        const rank = 8 - ix;
+        return `${level}${file}${rank}`;
+      };
+
+      const generateMoveNotation = (mover, target, pieces) => {
+        if (!mover) return '';
+        const mapCoordForNotation = (c, color) => {
+          if (!c) return c;
+          const ix = (typeof c.x === 'number') ? c.x : 0;
+          const iy = (typeof c.y === 'number') ? c.y : 0;
+          const iz = (typeof c.z === 'number') ? c.z : 0;
+          return { x: ix, y: iy, z: iz };
+        };
+        try { try { console.debug('generateMoveNotation inputs', { mover, target, piecesCount: pieces && pieces.length }); } catch (e) {} } catch (e) {}
+        const piece = mover.t;
+        const letter = piece === 'p' ? '' : piece;
+        const mappedTarget = mapCoordForNotation(target || {}, mover.color);
+        const mappedOrigin = mapCoordForNotation(mover, mover.color);
+        const targetNotation = squareToNotation(mappedTarget || {});
+
+        // simulate the move to detect check / mate for proper notation suffix
+        let checkSuffix = '';
+        let simulated = null;
+        try {
+          simulated = simulateMove(pieces || [], mover.id, target || {});
+          const opponent = mover.color === 'white' ? 'black' : 'white';
+          try {
+            const oppInCheck = isAnyKingInCheck(simulated, opponent);
+            const oppLegal = (getAllLegalMoves(simulated, opponent) || []);
+            const isMate = oppInCheck && oppLegal.length === 0;
+            checkSuffix = isMate ? '++' : (oppInCheck ? '+' : '');
+          } catch (e) {
+            checkSuffix = '';
+          }
+          try { console.debug('generateMoveNotation mapped', { mappedTarget, targetNotation, mappedOrigin, simulatedMoved: simulated && simulated.find(s => s.id === mover.id) || null, checkSuffix }); } catch (e) {}
+        } catch (e) { console.debug('simulateMove in notation err', e); }
+
+        if (target && target.castle) {
+          const startLevel = mover.z + 1;
+          const endLevel = (target.castle && target.castle.rookTo) ? target.castle.rookTo.z + 1 : (target.z != null ? target.z + 1 : mover.z + 1);
+          const o = target.castle.type === 'queen' ? 'O-O-O' : 'O-O';
+          return `${startLevel}${o}${endLevel}${checkSuffix}`;
+        }
+
+        const isCapture = !!( (target && target.enPassant) || (pieces && pieces.find(p => p.x === (target && target.x) && p.y === (target && target.y) && p.z === (target && target.z) && p.color !== mover.color)) );
+        if (piece === 'p') {
+          if (!isCapture) return `${targetNotation}${checkSuffix}`;
+          const originFile = String.fromCharCode('a'.charCodeAt(0) + (mappedOrigin.y || 0));
+          let ambiguousLevel = false;
+          if (pieces && pieces.length) {
+            for (const p of pieces) {
+              if (p.id === mover.id) continue;
+              if (p.t !== 'p' || p.color !== mover.color) continue;
+              if (p.y !== mover.y) continue;
+              if (canPieceMoveTo(p, target.x, target.y, target.z, pieces)) { ambiguousLevel = true; break; }
+            }
+          }
+          if (ambiguousLevel) {
+            const levelPrefix = (mappedOrigin.z != null ? (mappedOrigin.z + 1) : 1);
+            return `${levelPrefix}${originFile}x${targetNotation}${checkSuffix}`;
+          }
+          return `${originFile}x${targetNotation}${checkSuffix}`;
+        }
+        let ambiguous = false;
+        if (letter !== '') {
+          for (const p of pieces) {
+            if (p.id === mover.id) continue;
+            if (p.t !== mover.t) continue;
+            if (p.color !== mover.color) continue;
+            if (canPieceMoveTo(p, target.x, target.y, target.z, pieces)) { ambiguous = true; break; }
+          }
+        }
+        if (!ambiguous) return `${letter}${isCapture ? 'x' : ''}${targetNotation}${checkSuffix}`;
+        const origin = squareToNotation(mappedOrigin || {});
+        return `${letter}(${origin})${isCapture ? 'x' : ''}${targetNotation}${checkSuffix}`;
+      };
+
+      const moveLockRef = useRef(false);
+
+      // helper: generate all legal moves for a color
+      const getAllLegalMoves = useCallback((pieces, color) => {
+        const res = [];
+        for (const p of pieces) {
+          if (p.color !== color) continue;
+          for (let x = 0; x < 8; x++) {
+            for (let y = 0; y < 4; y++) {
+              for (let z = 0; z < 4; z++) {
+                try {
+                  if (!canPieceMoveTo(p, x, y, z, pieces)) continue;
+                  // For pawns, ensure diagonal captures only target enemy-occupied squares (avoid illegal diagonal moves into empty squares)
+                  if (p.t === 'p') {
+                    const isAttackMove = (function() {
+                      try { return attacksSquareByPiece(p, x, y, z, pieces); } catch (e) { return false; }
+                    })();
+                    if (isAttackMove) {
+                      const occ = pieces.find(pp => pp.x === x && pp.y === y && pp.z === z);
+                      if (!occ || occ.color === p.color) {
+                        // not a valid capture (no enemy there), skip
+                        continue;
+                      }
+                    }
+                  }
+                  const next = simulateMove(pieces, p.id, { x, y, z });
+                  if (!isAnyKingInCheck(next, color)) {
+                    res.push({ moverId: p.id, x, y, z });
+                  }
+                } catch (e) {}
+              }
+            }
+          }
+        }
+        return res;
+      }, [simulateMove, canPieceMoveTo, isAnyKingInCheck]);
+      const evaluatePosition = useCallback((pieces, color) => {
+        // stronger material emphasis and center control with piece-safety penalization
+        const vals = { p: 1, N: 3, B: 3, R: 5, Q: 9, K: 10000 };
+        let score = 0;
+        // central 8 squares explicit set (x,y,z)
+        const central8 = new Set(['3,1,1','4,1,1','3,2,1','4,2,1','3,1,2','4,1,2','3,2,2','4,2,2']);
+        // centrality function: prefer central ranks/files and middle levels
+        const centrality = (x, y, z) => {
+          let s = 0;
+          if (x >= 2 && x <= 5) s += 2;
+          if (y >= 1 && y <= 2) s += 2;
+          if (z === 1 || z === 2) s += 1;
+          return s;
+        };
+        
+        // Count developed pieces (knights and bishops that have moved from starting squares)
+        let developedMinorPieces = 0;
+        let undevelopedMinorPieces = 0;
+        const startingRanks = { white: 7, black: 0 };
+        const startRank = startingRanks[color];
+        
+        // First pass: count development
+        for (const p of pieces) {
+          if (p.color === color && (p.t === 'N' || p.t === 'B')) {
+            if (p.x !== startRank) {
+              developedMinorPieces++;
+            } else {
+              undevelopedMinorPieces++;
+            }
+          }
+        }
+        
+        // OVERWHELMING penalty for each undeveloped minor piece in opening
+        // This creates massive pressure to develop - each undeveloped piece is worth -2 pawns
+        score -= undevelopedMinorPieces * 25000;
+        
+        // OVERWHELMING bonus for each developed minor piece
+        // Each developed piece is worth +3 pawns equivalent
+        score += developedMinorPieces * 35000;
+        
+        for (const p of pieces) {
+          const v = vals[p.t] || 0;
+          const side = (p.color === color) ? 1 : -1;
+          // material is primary
+          score += side * v * 1000;
+          
+          // MAJOR penalty for moving queen early
+          if (p.color === color && p.t === 'Q') {
+            if (p.x !== startRank && developedMinorPieces < 2) {
+              score -= 25000; // queen early = catastrophic
+            }
+          }
+          
+          // MAJOR penalty for moving rooks early
+          if (p.color === color && p.t === 'R') {
+            if (p.x !== startRank && developedMinorPieces < 2) {
+              score -= 18000; // rook early also very bad
+            }
+          }
+          
+          // central control bonus scaled by piece strength
+          const cent = centrality(p.x, p.y, p.z);
+          score += side * v * 60 * cent;
+          
+          // explicit larger bonus for occupying the central 8 squares
+          try {
+            const key = `${p.x},${p.y},${p.z}`;
+            if (central8.has(key)) {
+              let occBonus = 500;
+              if (p.t === 'p') occBonus = 1800; // pawns especially good in center
+              if (p.t === 'N' || p.t === 'B') occBonus = 3000; // developed pieces in center even better
+              score += side * occBonus;
+            }
+          } catch (e) {}
+          
+          // safety: penalize pieces that are attacked more times than defended
+          try {
+            const attackers = attackersOfSquare(pieces, p.x, p.y, p.z).filter(a => a.color !== p.color).length;
+            const defenders = attackersOfSquare(pieces, p.x, p.y, p.z).filter(a => a.color === p.color).length;
+            if (attackers > defenders) {
+              const diff = attackers - defenders;
+              // penalize proportionally to piece value and number of attackers
+              score -= side * v * 400 * diff;
+            }
+          } catch (e) {}
+        }
+        
+        // mobility and pawn structure: mobility bonus
+        try {
+          const myMoves = getAllLegalMoves(pieces, color) || [];
+          const oppMoves = getAllLegalMoves(pieces, color === 'white' ? 'black' : 'white') || [];
+          score += (myMoves.length - oppMoves.length) * 15;
+        } catch (e) {}
+        
+          // control of central 8: reward having attackers on those squares
+          try {
+            let centralControl = 0;
+            for (const sq of Array.from(central8)) {
+              const [cx, cy, cz] = sq.split(',').map(Number);
+              const attackers = attackersOfSquare(pieces, cx, cy, cz).filter(a => a.color === color).length;
+              const enemyAttackers = attackersOfSquare(pieces, cx, cy, cz).filter(a => a.color !== color).length;
+              centralControl += (attackers - enemyAttackers);
+            }
+            score += centralControl * 300;
+          } catch (e) {}
+        
+        // tactical scan: detect if opponent has a fork (attack >=2 high-value pieces) and penalize
+        try {
+          const opponent = color === 'white' ? 'black' : 'white';
+          const oppMoves = getAllLegalMoves(pieces, opponent) || [];
+          let forkThreat = false;
+          for (const m of oppMoves) {
+            try {
+              const next = simulateMove(pieces, m.moverId, { x: m.x, y: m.y, z: m.z });
+              let attackedHigh = 0;
+              for (const p of next) {
+                if (p.color !== color) continue;
+                if (!(p.t === 'N' || p.t === 'B' || p.t === 'R' || p.t === 'Q')) continue;
+                const attackers = attackersOfSquare(next, p.x, p.y, p.z).filter(a => a.color !== p.color).length;
+                if (attackers > 0) attackedHigh++;
+                if (attackedHigh >= 2) break;
+              }
+              if (attackedHigh >= 2) { forkThreat = true; break; }
+            } catch (e) {}
+          }
+          if (forkThreat) score -= 2500;
+        } catch (e) {}
+        return score;
+      }, [getAllLegalMoves, simulateMove, attackersOfSquare]);
+
+      // search timing and state
+      const searchStateRef = useRef({ endTime: 0 });
+
+      // helper: order moves (captures first, then center-oriented), prefer moves that reduce undefended pieces
+      const orderMoves = useCallback((moves, pieces, side) => {
+        const vals = { p: 1, N: 3, B: 3, R: 5, Q: 9 };
+        const centerFactor = (m) => -(Math.abs(m.x - 3.5) + Math.abs(m.y - 1.5));
+        const central8 = new Set(['3,1,1','4,1,1','3,2,1','4,2,1','3,1,2','4,1,2','3,2,2','4,2,2']);
+        // precompute currently-attacked own pieces for defensive bonuses
+        const attackedNow = (pieces || []).filter(p => p.color === side).map(p => {
+          const attackers = attackersOfSquare(pieces, p.x, p.y, p.z).filter(a => a.color !== p.color).length;
+          const defenders = attackersOfSquare(pieces, p.x, p.y, p.z).filter(a => a.color === p.color).length;
+          return { id: p.id, x: p.x, y: p.y, z: p.z, attackers, defenders };
+        });
+        return moves.slice().sort((a, b) => {
+          const occA = (pieces || []).find(pp => pp.x === a.x && pp.y === a.y && pp.z === a.z && pp.color !== side);
+          const occB = (pieces || []).find(pp => pp.x === b.x && pp.y === b.y && pp.z === b.z && pp.color !== side);
+          const capA = occA ? (vals[occA.t] || 0) * 100 : 0;
+          const capB = occB ? (vals[occB.t] || 0) * 100 : 0;
+          let scoreA = capA + centerFactor(a);
+          let scoreB = capB + centerFactor(b);
+          try {
+            // simulate and penalize moves that leave more undefended own pieces
+            const nextA = simulateMove(pieces, a.moverId, { x: a.x, y: a.y, z: a.z });
+            const nextB = simulateMove(pieces, b.moverId, { x: b.x, y: b.y, z: b.z });
+            const countUndef = (arr, who) => {
+              let cnt = 0;
+              for (const p of arr) {
+                if (p.color !== who) continue;
+                const attackers = attackersOfSquare(arr, p.x, p.y, p.z).filter(x => x.color !== p.color).length;
+                const defenders = attackersOfSquare(arr, p.x, p.y, p.z).filter(x => x.color === p.color).length;
+                if (attackers > defenders) cnt++;
+              }
+              return cnt;
+            };
+            const undefA = countUndef(nextA, side);
+            const undefB = countUndef(nextB, side);
+            // penalize more undefended pieces
+            scoreA -= undefA * 500;
+            scoreB -= undefB * 500;
+            // detect opponent's last mover/capture using prevPiecesRef so we can prefer immediate recaptures/follow-ups
+            try {
+              const prev = (prevPiecesRef && prevPiecesRef.current) ? prevPiecesRef.current : [];
+              let movedList = [];
+              for (const p of pieces) {
+                try {
+                  const pv = prev.find(pp => pp.id === p.id) || null;
+                  if (!pv || pv.x !== p.x || pv.y !== p.y || pv.z !== p.z) movedList.push({ before: pv, after: p });
+                } catch (e) {}
+              }
+              const lastMover = (movedList.length > 0) ? movedList[movedList.length - 1].after : null;
+              // find any piece that disappeared (captured) from prev to pieces
+              let lastCaptured = null;
+              for (const pv of prev) {
+                try { if (!pieces.find(pp => pp.id === pv.id)) { lastCaptured = pv; break; } } catch (e) {}
+              }
+              if (lastMover && lastMover.color !== side) {
+                try {
+                  // if candidate captures the last mover directly, prioritize it
+                  if (a.x === lastMover.x && a.y === lastMover.y && a.z === lastMover.z) { scoreA += 4200; try { console.debug('orderMoves: prefer capturing last mover', a, lastMover); } catch(e){} }
+                  if (b.x === lastMover.x && b.y === lastMover.y && b.z === lastMover.z) { scoreB += 4200; try { console.debug('orderMoves: prefer capturing last mover', b, lastMover); } catch(e){} }
+                  // also reward moves that increase our attackers on that square
+                  try {
+                    const afterAattackers = attackersOfSquare(nextA, lastMover.x, lastMover.y, lastMover.z).filter(x => x.color === side).length;
+                    const afterBattackers = attackersOfSquare(nextB, lastMover.x, lastMover.y, lastMover.z).filter(x => x.color === side).length;
+                    if (afterAattackers > 0) { scoreA += afterAattackers * 900; try { console.debug('orderMoves: increases attackers on lastMover square', a, afterAattackers); } catch(e){} }
+                    if (afterBattackers > 0) { scoreB += afterBattackers * 900; try { console.debug('orderMoves: increases attackers on lastMover square', b, afterBattackers); } catch(e){} }
+                  } catch (e) {}
+                } catch (e) {}
+              }
+            } catch (e) {}
+            // CRITICAL: Massively discourage early queen moves to enforce proper opening principles
+            try {
+              const ply = (moveHistory && moveHistory.length) ? moveHistory.length * 2 : 0;
+              // Extremely harsh penalties for early queen moves - queen should stay home in opening!
+              let earlyQueenPenalty = 0;
+              if (ply < 10) earlyQueenPenalty = 50000; // moves 1-5: absolutely crushing penalty
+              else if (ply < 16) earlyQueenPenalty = 25000; // moves 6-8: still massive
+              else if (ply < 24) earlyQueenPenalty = 12000; // moves 9-12: very strong
+              else if (ply < 32) earlyQueenPenalty = 5000; // moves 13-16: strong
+              else earlyQueenPenalty = 1500; // later: mild
+              
+              const moverA = (pieces || []).find(pp => pp.id === a.moverId);
+              const moverB = (pieces || []).find(pp => pp.id === b.moverId);
+              
+              // Apply queen penalty (reduced if capturing high-value piece)
+              if (moverA && moverA.t === 'Q') {
+                const cappedQueenA = (capA > 500) ? (earlyQueenPenalty * 0.3) : earlyQueenPenalty; // allow queen if capturing high value
+                scoreA -= cappedQueenA;
+                if (cappedQueenA > 1000) try { console.debug('orderMoves: CRUSHING early queen penalty', a, cappedQueenA, 'ply=', ply); } catch(e){}
+              }
+              if (moverB && moverB.t === 'Q') {
+                const cappedQueenB = (capB > 500) ? (earlyQueenPenalty * 0.3) : earlyQueenPenalty;
+                scoreB -= cappedQueenB;
+                if (cappedQueenB > 1000) try { console.debug('orderMoves: CRUSHING early queen penalty', b, cappedQueenB, 'ply=', ply); } catch(e){}
+              }
+              
+              // Reward developing minor pieces (knights, bishops) in opening - MASSIVE PRIORITY
+              const developmentBonus = (ply < 20) ? 100000 : 15000; // OVERWHELMING bonus (increased from 25000)
+              if (moverA && (moverA.t === 'N' || moverA.t === 'B') && !moverA.hasMoved) {
+                scoreA += developmentBonus;
+                try { console.debug('orderMoves: OVERWHELMING development bonus for', moverA.t, a, developmentBonus); } catch(e){}
+              }
+              if (moverB && (moverB.t === 'N' || moverB.t === 'B') && !moverB.hasMoved) {
+                scoreB += developmentBonus;
+                try { console.debug('orderMoves: OVERWHELMING development bonus for', moverB.t, b, developmentBonus); } catch(e){}
+              }
+              
+              // CRITICAL: Massively penalize moving the same piece twice before development is complete
+              try {
+                const startRankWhite = 7;
+                const startRankBlack = 0;
+                const startRank = (side === 'white') ? startRankWhite : startRankBlack;
+                
+                // Count undeveloped minor pieces (knights/bishops still on starting rank)
+                const undevelopedMinors = (pieces || []).filter(p => 
+                  p.color === side && 
+                  (p.t === 'N' || p.t === 'B') && 
+                  p.x === startRank
+                ).length;
+                
+                // If there are undeveloped pieces, heavily penalize moving already-moved pieces
+                if (undevelopedMinors > 0 && ply < 24) {
+                  if (moverA && moverA.hasMoved && (moverA.t !== 'K')) {
+                    // Exception: allow if capturing valuable piece or escaping immediate threat
+                    const isCapturingValuable = capA >= 300; // capturing knight or better
+                    let isEscapingThreat = false;
+                    try {
+                      const attackers = attackersOfSquare(pieces, moverA.x, moverA.y, moverA.z).filter(att => att.color !== side).length;
+                      const defenders = attackersOfSquare(pieces, moverA.x, moverA.y, moverA.z).filter(def => def.color === side).length;
+                      isEscapingThreat = (attackers > defenders);
+                    } catch (e) {}
+                    
+                    if (!isCapturingValuable && !isEscapingThreat) {
+                      const penalty = 40000; // CRUSHING penalty for moving same piece twice
+                      scoreA -= penalty;
+                      try { console.debug('orderMoves: CRUSHING penalty for moving same piece twice', moverA.t, a, 'undeveloped=', undevelopedMinors, 'penalty=', penalty); } catch(e){}
+                    }
+                  }
+                  
+                  if (moverB && moverB.hasMoved && (moverB.t !== 'K')) {
+                    const isCapturingValuable = capB >= 300;
+                    let isEscapingThreat = false;
+                    try {
+                      const attackers = attackersOfSquare(pieces, moverB.x, moverB.y, moverB.z).filter(att => att.color !== side).length;
+                      const defenders = attackersOfSquare(pieces, moverB.x, moverB.y, moverB.z).filter(def => def.color === side).length;
+                      isEscapingThreat = (attackers > defenders);
+                    } catch (e) {}
+                    
+                    if (!isCapturingValuable && !isEscapingThreat) {
+                      const penalty = 40000;
+                      scoreB -= penalty;
+                      try { console.debug('orderMoves: CRUSHING penalty for moving same piece twice', moverB.t, b, 'undeveloped=', undevelopedMinors, 'penalty=', penalty); } catch(e){}
+                    }
+                  }
+                }
+              } catch (e) {}
+              
+              // Extra bonus for central development (knights to c3/f3/c6/f6 area, bishops to good diagonals)
+              try {
+                const central8 = new Set(['3,1,1','4,1,1','3,2,1','4,2,1','3,1,2','4,1,2','3,2,2','4,2,2']);
+                const keyA = `${a.x},${a.y},${a.z}`;
+                const keyB = `${b.x},${b.y},${b.z}`;
+                if (moverA && (moverA.t === 'N' || moverA.t === 'B') && central8.has(keyA)) {
+                  scoreA += 6000; // increased from 3000
+                  try { console.debug('orderMoves: central development bonus', moverA.t, a); } catch(e){}
+                }
+                if (moverB && (moverB.t === 'N' || moverB.t === 'B') && central8.has(keyB)) {
+                  scoreB += 6000;
+                  try { console.debug('orderMoves: central development bonus', moverB.t, b); } catch(e){}
+                }
+                
+                // Bonus for ANY piece attacking central squares (not just occupying)
+                if (ply < 30) {
+                  let centralAttacksA = 0;
+                  let centralAttacksB = 0;
+                  for (const sq of Array.from(central8)) {
+                    const [cx, cy, cz] = sq.split(',').map(Number);
+                    // Check if move A's piece can attack this central square after the move
+                    try {
+                      const nextA = simulateMove(pieces, a.moverId, { x: a.x, y: a.y, z: a.z });
+                      const movedPiece = nextA.find(p => p.id === a.moverId);
+                      if (movedPiece && attacksSquareByPiece(movedPiece, cx, cy, cz, nextA)) {
+                        centralAttacksA++;
+                      }
+                    } catch (e) {}
+                    try {
+                      const nextB = simulateMove(pieces, b.moverId, { x: b.x, y: b.y, z: b.z });
+                      const movedPiece = nextB.find(p => p.id === b.moverId);
+                      if (movedPiece && attacksSquareByPiece(movedPiece, cx, cy, cz, nextB)) {
+                        centralAttacksB++;
+                      }
+                    } catch (e) {}
+                  }
+                  if (centralAttacksA > 0) {
+                    const bonus = centralAttacksA * 2500;
+                    scoreA += bonus;
+                    try { console.debug('orderMoves: central attack bonus', a, 'attacks=', centralAttacksA, 'bonus=', bonus); } catch(e){}
+                  }
+                  if (centralAttacksB > 0) {
+                    const bonus = centralAttacksB * 2500;
+                    scoreB += bonus;
+                    try { console.debug('orderMoves: central attack bonus', b, 'attacks=', centralAttacksB, 'bonus=', bonus); } catch(e){}
+                  }
+                }
+              } catch (e) {}
+              
+              // HUGE bonus for double-pawn moves if they're safe and advance toward center
+              if (moverA && moverA.t === 'p' && ply < 20) {
+                const pawnMoveDist = Math.abs(a.x - moverA.x);
+                if (pawnMoveDist === 2) {
+                  // This is a double-pawn move
+                  // Check if it's safe (not immediately capturable with positive SEE)
+                  try {
+                    const nextA = simulateMove(pieces, a.moverId, { x: a.x, y: a.y, z: a.z });
+                    const opponent = side === 'white' ? 'black' : 'white';
+                    const oppMoves = getAllLegalMoves(nextA, opponent) || [];
+                    let isSafe = true;
+                    for (const oc of oppMoves) {
+                      if (oc.x === a.x && oc.y === a.y && oc.z === a.z) {
+                        try {
+                          const see = staticExchangeEval(nextA, oc.x, oc.y, oc.z, opponent);
+                          if (typeof see === 'number' && see > 0) { isSafe = false; break; }
+                        } catch (e) {}
+                      }
+                    }
+                    if (isSafe) {
+                      // Extra bonus for central files
+                      const centralFile = (a.y === 1 || a.y === 2) ? 50000 : 25000; // HUGE increase from 8000/4000
+                      scoreA += centralFile;
+                      try { console.debug('orderMoves: HUGE double-pawn move bonus', a, centralFile); } catch(e){}
+                    }
+                  } catch (e) {}
+                }
+              }
+              if (moverB && moverB.t === 'p' && ply < 20) {
+                const pawnMoveDist = Math.abs(b.x - moverB.x);
+                if (pawnMoveDist === 2) {
+                  try {
+                    const nextB = simulateMove(pieces, b.moverId, { x: b.x, y: b.y, z: b.z });
+                    const opponent = side === 'white' ? 'black' : 'white';
+                    const oppMoves = getAllLegalMoves(nextB, opponent) || [];
+                    let isSafe = true;
+                    for (const oc of oppMoves) {
+                      if (oc.x === b.x && oc.y === b.y && oc.z === b.z) {
+                        try {
+                          const see = staticExchangeEval(nextB, oc.x, oc.y, oc.z, opponent);
+                          if (typeof see === 'number' && see > 0) { isSafe = false; break; }
+                        } catch (e) {}
+                      }
+                    }
+                    if (isSafe) {
+                      const centralFile = (b.y === 1 || b.y === 2) ? 50000 : 25000; // HUGE increase from 8000/4000
+                      scoreB += centralFile;
+                      try { console.debug('orderMoves: HUGE double-pawn move bonus', b, centralFile); } catch(e){}
+                    }
+                  } catch (e) {}
+                }
+              }
+              
+              // Note: Pawn moves (both single and double) serve important purposes:
+              // - Defend other pawns
+              // - Open lines for bishops
+              // - Control center
+              // The AI should focus on DEVELOPING KNIGHTS AND BISHOPS, not avoiding pawn moves
+              
+              // MASSIVE penalties for early rook moves (ruins castling, wastes tempo)
+              let earlyRookPenalty = 0;
+              if (ply < 12) earlyRookPenalty = 35000; // moves 1-6: crushing
+              else if (ply < 20) earlyRookPenalty = 15000; // moves 7-10: very strong
+              else if (ply < 30) earlyRookPenalty = 3000; // moves 11-15: strong
+              else earlyRookPenalty = 800; // later: mild
+              if (moverA && moverA.t === 'R' && capA === 0) {
+                // measure mobility improvement -- if small, apply extra penalty
+                try {
+                  const myMovesBefore = (getAllLegalMoves(pieces, side) || []).length;
+                  const myMovesAfter = (getAllLegalMoves(nextA, side) || []).length;
+                  const mobilityDelta = myMovesAfter - myMovesBefore;
+                  if (mobilityDelta < 2) scoreA -= earlyRookPenalty + 600; else scoreA -= earlyRookPenalty;
+                } catch (e) { scoreA -= earlyRookPenalty; }
+                try {
+                  // additional: penalize moving rook off an open file or losing file control
+                  const rook = (pieces || []).find(pp => pp.id === a.moverId);
+                  if (rook && rook.t === 'R') {
+                    // file = y coordinate; open file = no pawns on that y
+                    const pawnsOnFile = (pieces || []).filter(p => p.t === 'p' && p.y === rook.y).length;
+                    const movesBeforeRook = (getAllLegalMoves(pieces, side) || []).filter(mv => mv.moverId === rook.id).length;
+                    const movesAfterRook = (getAllLegalMoves(nextA, side) || []).filter(mv => mv.moverId === rook.id).length;
+                    if (pawnsOnFile === 0 && a.y !== rook.y) {
+                      scoreA -= 3000;
+                      try { console.debug('orderMoves: penalize rook moving off open file', a, { pawnsOnFile, movesBeforeRook, movesAfterRook }); } catch(e){}
+                    } else if (movesAfterRook < movesBeforeRook && movesBeforeRook >= 3) {
+                      scoreA -= 1200;
+                      try { console.debug('orderMoves: penalize rook mobility loss', a, { movesBeforeRook, movesAfterRook }); } catch(e){}
+                    }
+                    // penalize moving rook from back rank early
+                    try {
+                      const backRankX = (rook.color === 'white') ? 7 : 0;
+                      if (rook.x === backRankX && a.x !== backRankX && (moveHistory && moveHistory.length) && moveHistory.length < 20) {
+                        scoreA -= 1000;
+                        try { console.debug('orderMoves: penalize early back-rank rook move', a, { rookBeforeX: rook.x }); } catch(e){}
+                      }
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+              }
+              if (moverB && moverB.t === 'R' && capB === 0) {
+                try {
+                  const myMovesBefore = (getAllLegalMoves(pieces, side) || []).length;
+                  const myMovesAfter = (getAllLegalMoves(nextB, side) || []).length;
+                  const mobilityDelta = myMovesAfter - myMovesBefore;
+                  if (mobilityDelta < 2) scoreB -= earlyRookPenalty + 600; else scoreB -= earlyRookPenalty;
+                } catch (e) { scoreB -= earlyRookPenalty; }
+                try {
+                  const rook = (pieces || []).find(pp => pp.id === b.moverId);
+                  if (rook && rook.t === 'R') {
+                    const pawnsOnFile = (pieces || []).filter(p => p.t === 'p' && p.y === rook.y).length;
+                    const movesBeforeRook = (getAllLegalMoves(pieces, side) || []).filter(mv => mv.moverId === rook.id).length;
+                    const movesAfterRook = (getAllLegalMoves(nextB, side) || []).filter(mv => mv.moverId === rook.id).length;
+                    if (pawnsOnFile === 0 && b.y !== rook.y) {
+                      scoreB -= 3000;
+                      try { console.debug('orderMoves: penalize rook moving off open file', b, { pawnsOnFile, movesBeforeRook, movesAfterRook }); } catch(e){}
+                    } else if (movesAfterRook < movesBeforeRook && movesBeforeRook >= 3) {
+                      scoreB -= 1200;
+                      try { console.debug('orderMoves: penalize rook mobility loss', b, { movesBeforeRook, movesAfterRook }); } catch(e){}
+                    }
+                    try {
+                      const backRankX = (rook.color === 'white') ? 7 : 0;
+                      if (rook.x === backRankX && b.x !== backRankX && (moveHistory && moveHistory.length) && moveHistory.length < 20) {
+                        scoreB -= 1000;
+                        try { console.debug('orderMoves: penalize early back-rank rook move', b, { rookBeforeX: rook.x }); } catch(e){}
+                      }
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+              }
+              // discourage early knight sorties if pawns haven't supported center (prefer pawn moves first)
+              try {
+                const pawnMovedCount = (pieces || []).filter(p => p.color === side && p.t === 'p' && p.hasMoved).length;
+                const knightEarlyPenalty = (ply < 20 && pawnMovedCount < 2) ? 700 : 0;
+                if (moverA && moverA.t === 'N' && capA === 0) scoreA -= knightEarlyPenalty;
+                if (moverB && moverB.t === 'N' && capB === 0) scoreB -= knightEarlyPenalty;
+                // discourage early king moves (except castling) strongly in opening unless they clearly improve safety
+                try {
+                  const kingEarlyCutoff = 20; // ply cutoff
+                  const kingPenaltyBase = 10000;
+                  const moverA_k = (pieces || []).find(pp => pp.id === a.moverId);
+                  const moverB_k = (pieces || []).find(pp => pp.id === b.moverId);
+                  if (ply < kingEarlyCutoff) {
+                    if (moverA_k && moverA_k.t === 'K') {
+                      const isCastle = Math.abs((a.y || 0) - (moverA_k.y || 0)) === 2;
+                      if (!isCastle) {
+                        try {
+                          const attackersBefore = attackersOfSquare(pieces, moverA_k.x, moverA_k.y, moverA_k.z).filter(x => x.color !== side).length;
+                          const attackersAfter = attackersOfSquare(nextA, a.x, a.y, a.z).filter(x => x.color !== side).length;
+                          if (attackersAfter >= attackersBefore) {
+                            scoreA -= kingPenaltyBase; // heavily discourage aimless king moves
+                          } else {
+                            scoreA -= Math.floor(kingPenaltyBase / 4); // small penalty even if it improves safety
+                          }
+                        } catch (e) { scoreA -= kingPenaltyBase; }
+                      }
+                    }
+                    if (moverB_k && moverB_k.t === 'K') {
+                      const isCastleB = Math.abs((b.y || 0) - (moverB_k.y || 0)) === 2;
+                      if (!isCastleB) {
+                        try {
+                          const attackersBeforeB = attackersOfSquare(pieces, moverB_k.x, moverB_k.y, moverB_k.z).filter(x => x.color !== side).length;
+                          const attackersAfterB = attackersOfSquare(nextB, b.x, b.y, b.z).filter(x => x.color !== side).length;
+                          if (attackersAfterB >= attackersBeforeB) {
+                            scoreB -= kingPenaltyBase;
+                          } else {
+                            scoreB -= Math.floor(kingPenaltyBase / 4);
+                          }
+                        } catch (e) { scoreB -= kingPenaltyBase; }
+                      }
+                    }
+                  }
+                } catch (e) {}
+                // discourage moving the same minor piece twice in the opening (first 10 full moves)
+                try {
+                  const openingMinorPenalty = (ply < 20) ? 1800 : 800;
+                  if (moverA && (moverA.t === 'N' || moverA.t === 'B') && moverA.hasMoved) {
+                    scoreA -= openingMinorPenalty;
+                    try { console.debug('orderMoves: penalize minor-piece moving twice in opening', a, openingMinorPenalty); } catch(e){}
+                  }
+                  if (moverB && (moverB.t === 'N' || moverB.t === 'B') && moverB.hasMoved) {
+                    scoreB -= openingMinorPenalty;
+                    try { console.debug('orderMoves: penalize minor-piece moving twice in opening', b, openingMinorPenalty); } catch(e){}
+                  }
+                } catch (e) {}
+              } catch (e) {}
+            } catch (e) {}
+            // prefer castling moves
+            try {
+              if (a.castle) scoreA += 700;
+              if (b.castle) scoreB += 700;
+            } catch (e) {}
+            // favor moves that occupy or increase control of central-8 squares
+            try {
+              const aKey = `${a.x},${a.y},${a.z}`;
+              const bKey = `${b.x},${b.y},${b.z}`;
+              if (central8.has(aKey)) { scoreA += 900; try { console.debug('orderMoves: central8 occupy bonus for move', a); } catch(e){} }
+              if (central8.has(bKey)) { scoreB += 900; try { console.debug('orderMoves: central8 occupy bonus for move', b); } catch(e){} }
+              // also reward moves that increase net attackers on central squares
+              try {
+                const nextA = simulateMove(pieces, a.moverId, { x: a.x, y: a.y, z: a.z });
+                const nextB = simulateMove(pieces, b.moverId, { x: b.x, y: b.y, z: b.z });
+                let deltaA = 0, deltaB = 0;
+                for (const sq of Array.from(central8)) {
+                  const [cx, cy, cz] = sq.split(',').map(Number);
+                  const before = attackersOfSquare(pieces, cx, cy, cz).filter(x => x.color === side).length - attackersOfSquare(pieces, cx, cy, cz).filter(x => x.color !== side).length;
+                  const afterA = attackersOfSquare(nextA, cx, cy, cz).filter(x => x.color === side).length - attackersOfSquare(nextA, cx, cy, cz).filter(x => x.color !== side).length;
+                  const afterB = attackersOfSquare(nextB, cx, cy, cz).filter(x => x.color === side).length - attackersOfSquare(nextB, cx, cy, cz).filter(x => x.color !== side).length;
+                  deltaA += (afterA - before);
+                  deltaB += (afterB - before);
+                }
+                scoreA += deltaA * 220;
+                scoreB += deltaB * 220;
+                if (deltaA > 0) try { console.debug('orderMoves: increased central control by', deltaA, 'for', a); } catch(e) {}
+                if (deltaB > 0) try { console.debug('orderMoves: increased central control by', deltaB, 'for', b); } catch(e) {}
+              } catch (e) {}
+              // if opponent just moved a pawn into central-8, prioritize moves that contest or defend it
+              try {
+                if (typeof lastMove !== 'undefined' && lastMove && lastMove.to) {
+                  const lm = lastMove.to;
+                  const lmKey = `${lm.x},${lm.y},${lm.z}`;
+                  const oppPawnThere = (pieces || []).find(pp => pp.x === lm.x && pp.y === lm.y && pp.z === lm.z && pp.t === 'p' && pp.color !== side);
+                  if (central8.has(lmKey) && oppPawnThere) {
+                    // capturing that pawn is highest priority
+                    if (a.x === lm.x && a.y === lm.y && a.z === lm.z) { scoreA += 8000; try { console.debug('orderMoves: capture central pawn priority', a); } catch(e){} }
+                    if (b.x === lm.x && b.y === lm.y && b.z === lm.z) { scoreB += 8000; try { console.debug('orderMoves: capture central pawn priority', b); } catch(e){} }
+                    // moving own pawn into central-8 to contest
+                    if ((pieces || []).find(pp => pp.id === a.moverId && pp.t === 'p')) {
+                      const aKey2 = `${a.x},${a.y},${a.z}`;
+                      if (central8.has(aKey2)) { scoreA += 5000; try { console.debug('orderMoves: pawn contest central8 bonus', a); } catch(e){} }
+                      // pawn approach bonus: reward pawn moves that move closer to any central8 square
+                      try {
+                        const pawnBefore = (pieces || []).find(pp => pp.id === a.moverId);
+                        if (pawnBefore) {
+                          let beforeDist = Infinity, afterDist = Infinity;
+                          for (const sq of Array.from(central8)) {
+                            const [cx, cy, cz] = sq.split(',').map(Number);
+                            const dBefore = Math.abs(pawnBefore.x - cx) + Math.abs(pawnBefore.y - cy) + Math.abs(pawnBefore.z - cz);
+                            const dAfter = Math.abs(a.x - cx) + Math.abs(a.y - cy) + Math.abs(a.z - cz);
+                            if (dBefore < beforeDist) beforeDist = dBefore;
+                            if (dAfter < afterDist) afterDist = dAfter;
+                          }
+                          const delta = beforeDist - afterDist;
+                          if (delta > 0) { scoreA += delta * 1600; try { console.debug('orderMoves: pawn approach central8 bonus', a, delta); } catch(e){} }
+                        }
+                      } catch (e) {}
+                    }
+                    if ((pieces || []).find(pp => pp.id === b.moverId && pp.t === 'p')) {
+                      const bKey2 = `${b.x},${b.y},${b.z}`;
+                      if (central8.has(bKey2)) { scoreB += 5000; try { console.debug('orderMoves: pawn contest central8 bonus', b); } catch(e){} }
+                      try {
+                        const pawnBefore = (pieces || []).find(pp => pp.id === b.moverId);
+                        if (pawnBefore) {
+                          let beforeDist = Infinity, afterDist = Infinity;
+                          for (const sq of Array.from(central8)) {
+                            const [cx, cy, cz] = sq.split(',').map(Number);
+                            const dBefore = Math.abs(pawnBefore.x - cx) + Math.abs(pawnBefore.y - cy) + Math.abs(pawnBefore.z - cz);
+                            const dAfter = Math.abs(b.x - cx) + Math.abs(b.y - cy) + Math.abs(b.z - cz);
+                            if (dBefore < beforeDist) beforeDist = dBefore;
+                            if (dAfter < afterDist) afterDist = dAfter;
+                          }
+                          const delta = beforeDist - afterDist;
+                          if (delta > 0) { scoreB += delta * 1600; try { console.debug('orderMoves: pawn approach central8 bonus', b, delta); } catch(e){} }
+                        }
+                      } catch (e) {}
+                    }
+                    // rewarding moves that increase defenders on that pawn
+                    try {
+                      const beforeDef = attackersOfSquare(pieces, lm.x, lm.y, lm.z).filter(a2 => a2.color === oppPawnThere.color).length;
+                      const nextA2 = simulateMove(pieces, a.moverId, { x: a.x, y: a.y, z: a.z });
+                      const nextB2 = simulateMove(pieces, b.moverId, { x: b.x, y: b.y, z: b.z });
+                      const defA = attackersOfSquare(nextA2, lm.x, lm.y, lm.z).filter(a2 => a2.color === oppPawnThere.color).length;
+                      const defB = attackersOfSquare(nextB2, lm.x, lm.y, lm.z).filter(a2 => a2.color === oppPawnThere.color).length;
+                      // if our move increases attackers of that pawn by our side (i.e., we defend it), give bonus
+                      const ourBefore = attackersOfSquare(pieces, lm.x, lm.y, lm.z).filter(a2 => a2.color === side).length;
+                      const ourAfterA = attackersOfSquare(nextA2, lm.x, lm.y, lm.z).filter(a2 => a2.color === side).length;
+                      const ourAfterB = attackersOfSquare(nextB2, lm.x, lm.y, lm.z).filter(a2 => a2.color === side).length;
+                      const deltaOurA = ourAfterA - ourBefore;
+                      const deltaOurB = ourAfterB - ourBefore;
+                      if (deltaOurA > 0) { scoreA += deltaOurA * 2500; try { console.debug('orderMoves: defend opponent-central-pawn? increased our defenders by', deltaOurA, a); } catch(e){} }
+                      if (deltaOurB > 0) { scoreB += deltaOurB * 2500; try { console.debug('orderMoves: defend opponent-central-pawn? increased our defenders by', deltaOurB, b); } catch(e){} }
+                    } catch (e) {}
+                  }
+                }
+              } catch (e) {}
+            } catch (e) {}
+            // avoid early non-capturing king moves unless in check
+            try {
+              const inCheck = isAnyKingInCheck(pieces, side);
+              const moverA = (pieces || []).find(pp => pp.id === a.moverId);
+              const moverB = (pieces || []).find(pp => pp.id === b.moverId);
+              if (moverA && moverA.t === 'K' && !occA && !inCheck) scoreA -= 12000;
+              if (moverB && moverB.t === 'K' && !occB && !inCheck) scoreB -= 12000;
+              // extra: penalize king moves that reduce mobility or central presence when not capturing
+              try {
+                if (moverA && moverA.t === 'K' && !occA && !inCheck) {
+                  const beforeMob = (getAllLegalMoves(pieces, side) || []).filter(mv => mv.moverId === moverA.id).length;
+                  const afterA = simulateMove(pieces, a.moverId, { x: a.x, y: a.y, z: a.z });
+                  const afterMob = (getAllLegalMoves(afterA, side) || []).filter(mv => mv.moverId === moverA.id).length;
+                  const mobDelta = afterMob - beforeMob;
+                  const beforeCent = Math.abs(moverA.x - 3.5) + Math.abs(moverA.y - 1.5);
+                  const afterCent = Math.abs(a.x - 3.5) + Math.abs(a.y - 1.5);
+                  if (mobDelta < 0 || afterCent > beforeCent) { scoreA -= 3000; try { console.debug('orderMoves: penalize king retreat/mobility loss', { move: a, mobDelta, beforeCent, afterCent }); } catch(e){} }
+                }
+                if (moverB && moverB.t === 'K' && !occB && !inCheck) {
+                  const beforeMob = (getAllLegalMoves(pieces, side) || []).filter(mv => mv.moverId === moverB.id).length;
+                  const afterB = simulateMove(pieces, b.moverId, { x: b.x, y: b.y, z: b.z });
+                  const afterMob = (getAllLegalMoves(afterB, side) || []).filter(mv => mv.moverId === moverB.id).length;
+                  const mobDelta = afterMob - beforeMob;
+                  const beforeCent = Math.abs(moverB.x - 3.5) + Math.abs(moverB.y - 1.5);
+                  const afterCent = Math.abs(b.x - 3.5) + Math.abs(b.y - 1.5);
+                  if (mobDelta < 0 || afterCent > beforeCent) { scoreB -= 3000; try { console.debug('orderMoves: penalize king retreat/mobility loss', { move: b, mobDelta, beforeCent, afterCent }); } catch(e){} }
+                }
+              } catch (e) {}
+            } catch (e) {}
+            // prioritize immediate recapture of last moved-to square
+            try {
+              if (typeof lastMove !== 'undefined' && lastMove && lastMove.to) {
+                const lx = lastMove.to.x, ly = lastMove.to.y, lz = lastMove.to.z;
+                // require tactical sanity: only heavily prefer recapture if SEE is non-negative.
+                try {
+                  if (a.x === lx && a.y === ly && a.z === lz) {
+                    try {
+                      const seeA = staticExchangeEval(pieces, lx, ly, lz, side);
+                      const moverA = (pieces || []).find(pp => pp.id === a.moverId) || null;
+                      if (seeA >= 0) scoreA += 5000;
+                      else {
+                        if (moverA && (moverA.t === 'R' || moverA.t === 'Q')) scoreA -= 4000; else scoreA += 200;
+                        try { console.debug('orderMoves: recapture discouraged by SEE', { move: a, seeA, mover: moverA && moverA.t }); } catch(e){}
+                      }
+                    } catch (e) { scoreA += 0; }
+                  }
+                } catch (e) {}
+                try {
+                  if (b.x === lx && b.y === ly && b.z === lz) {
+                    try {
+                      const seeB = staticExchangeEval(pieces, lx, ly, lz, side);
+                      const moverB = (pieces || []).find(pp => pp.id === b.moverId) || null;
+                      if (seeB >= 0) scoreB += 5000;
+                      else {
+                        if (moverB && (moverB.t === 'R' || moverB.t === 'Q')) scoreB -= 4000; else scoreB += 200;
+                        try { console.debug('orderMoves: recapture discouraged by SEE', { move: b, seeB, mover: moverB && moverB.t }); } catch(e){}
+                      }
+                    } catch (e) { scoreB += 0; }
+                  }
+                } catch (e) {}
+              }
+            } catch (e) {}
+            // reward moves that improve defenders on currently-attacked own pieces
+            try {
+              const defenderBonus = (m) => {
+                let bonus = 0;
+                try {
+                  const next = simulateMove(pieces, m.moverId, { x: m.x, y: m.y, z: m.z });
+                  for (const at of attackedNow) {
+                    const afterOcc = next.find(pp => pp.id === at.id);
+                    if (!afterOcc) continue; // captured
+                    const attackersAfter = attackersOfSquare(next, afterOcc.x, afterOcc.y, afterOcc.z).filter(a => a.color !== afterOcc.color).length;
+                    const defendersAfter = attackersOfSquare(next, afterOcc.x, afterOcc.y, afterOcc.z).filter(a => a.color === afterOcc.color).length;
+                    // if defenders increased or attackers decreased, give bonus
+                    if (defendersAfter > at.defenders) bonus += 400;
+                    if (attackersAfter < at.attackers) bonus += 300;
+                  }
+                } catch (e) {}
+                return bonus;
+              };
+              scoreA += defenderBonus(a);
+              scoreB += defenderBonus(b);
+            } catch (e) {}
+            // If we have high-value own pieces currently attacked (B/N/R/Q), prefer moves that address them.
+            try {
+              const attackedHigh = (pieces || []).filter(p => p.color === side && (p.t === 'B' || p.t === 'N' || p.t === 'R' || p.t === 'Q')).map(p => {
+                const attackers = attackersOfSquare(pieces, p.x, p.y, p.z).filter(a => a.color !== p.color);
+                const defenders = attackersOfSquare(pieces, p.x, p.y, p.z).filter(a => a.color === p.color);
+                return { id: p.id, x: p.x, y: p.y, z: p.z, t: p.t, attackers: attackers, defenders: defenders };
+              }).filter(h => h.attackers.length > h.defenders.length);
+              if (attackedHigh && attackedHigh.length > 0) {
+                const addressesThreat = (move, attackedList) => {
+                  try {
+                    const next = simulateMove(pieces, move.moverId, { x: move.x, y: move.y, z: move.z });
+                    for (const hp of attackedList) {
+                      // if our move captures one of the attackers, that's good
+                      const attackersNow = attackersOfSquare(pieces, hp.x, hp.y, hp.z).filter(a => a.color !== hp.color);
+                      for (const at of attackersNow) {
+                        if (move.x === at.x && move.y === at.y && move.z === at.z) return true;
+                      }
+                      // if the threatened piece itself moved to safety
+                      if (move.moverId === hp.id) {
+                        const occAfter = next.find(pp => pp.id === hp.id);
+                        if (!occAfter) return true; // moved/captured
+                        const atkAfter = attackersOfSquare(next, occAfter.x, occAfter.y, occAfter.z).filter(a => a.color !== occAfter.color).length;
+                        const defAfter = attackersOfSquare(next, occAfter.x, occAfter.y, occAfter.z).filter(a => a.color === occAfter.color).length;
+                        if (defAfter >= atkAfter) return true;
+                      }
+                      // if our move increases defenders on threatened piece
+                      const occAfter2 = next.find(pp => pp.id === hp.id);
+                      if (occAfter2) {
+                        const defAfter2 = attackersOfSquare(next, occAfter2.x, occAfter2.y, occAfter2.z).filter(a => a.color === occAfter2.color).length;
+                        if (defAfter2 > hp.defenders.length) return true;
+                      } else {
+                        // piece disappeared (captured) - not good
+                        return false;
+                      }
+                      // if our move captures the attacking piece by moving to their square
+                    }
+                  } catch (e) {}
+                  return false;
+                };
+                try {
+                  if (!addressesThreat(a, attackedHigh)) { scoreA -= 2000; try { console.debug('orderMoves: penalize move that ignores attacked high-value piece', a, attackedHigh); } catch(e){} }
+                  if (!addressesThreat(b, attackedHigh)) { scoreB -= 2000; try { console.debug('orderMoves: penalize move that ignores attacked high-value piece', b, attackedHigh); } catch(e){} }
+                } catch (e) {}
+              }
+            } catch (e) {}
+            // reward moves that increase minor-piece mobility (knights and bishops)
+            try {
+              const minorMobility = (state, sideColor) => {
+                let cnt = 0;
+                for (const p of (state || [])) {
+                  if (p.color !== sideColor) continue;
+                  if (p.t !== 'N' && p.t !== 'B') continue;
+                  try { cnt += (getAllLegalMoves(state, sideColor) || []).filter(mv => mv.moverId === p.id).length; } catch(e){}
+                }
+                return cnt;
+              };
+              try {
+                const beforeMinor = (() => {
+                  let c = 0; try { c = minorMobility(pieces, side); } catch(e){} return c;
+                })();
+                const afterA = (() => { try { return minorMobility(simulateMove(pieces, a.moverId, { x: a.x, y: a.y, z: a.z }), side); } catch(e){return 0;} })();
+                const afterB = (() => { try { return minorMobility(simulateMove(pieces, b.moverId, { x: b.x, y: b.y, z: b.z }), side); } catch(e){return 0;} })();
+                const deltaA = afterA - beforeMinor;
+                const deltaB = afterB - beforeMinor;
+                if (deltaA > 0) { scoreA += deltaA * 450; try { console.debug('orderMoves: minor mobility bonus', a, deltaA); } catch(e){} }
+                if (deltaB > 0) { scoreB += deltaB * 450; try { console.debug('orderMoves: minor mobility bonus', b, deltaB); } catch(e){} }
+              } catch (e){}
+            } catch (e) {}
+            // encourage pawn moves that open diagonals for bishops (development)
+            try {
+              const isPawnOpenForBishop = (move) => {
+                try {
+                  const mover = (pieces || []).find(pp => pp.id === move.moverId);
+                  if (!mover || mover.t !== 'p') return 0;
+                  const next = simulateMove(pieces, mover.id, { x: move.x, y: move.y, z: move.z });
+                  // for each friendly bishop, count their legal moves before/after
+                  let delta = 0;
+                  for (const b of (pieces || []).filter(p => p.color === side && p.t === 'B')) {
+                    const before = (getAllLegalMoves(pieces, side) || []).filter(mv=>mv.moverId===b.id).length;
+                    const after = (getAllLegalMoves(next, side) || []).filter(mv=>mv.moverId===b.id).length;
+                    delta += (after - before);
+                  }
+                  return delta;
+                } catch (e) { return 0; }
+              };
+              const pawnOpenA = isPawnOpenForBishop(a);
+              const pawnOpenB = isPawnOpenForBishop(b);
+              if (pawnOpenA > 0) { scoreA += pawnOpenA * 700; try { console.debug('orderMoves: pawn move opens bishop mobility', a, pawnOpenA); } catch(e){} }
+              if (pawnOpenB > 0) { scoreB += pawnOpenB * 700; try { console.debug('orderMoves: pawn move opens bishop mobility', b, pawnOpenB); } catch(e){} }
+            } catch (e) {}
+            // prefer favorable trades: use SEE to prefer captures that are non-negative
+            try {
+              if (occA) {
+                try {
+                  const seeA = staticExchangeEval(pieces, a.x, a.y, a.z, side);
+                  if (seeA >= 0) {
+                    scoreA += 1200;
+                    try { console.debug('orderMoves: favorable trade (SEE) for', a, seeA); } catch(e){}
+                  } else {
+                    // penalize unsafe bishop/knight captures when SEE is negative (avoid cheap sacrifices)
+                    const moverA = (pieces || []).find(pp => pp.id === a.moverId) || null;
+                    if (moverA && (moverA.t === 'B' || moverA.t === 'N')) {
+                      scoreA -= 3000;
+                      try { console.debug('orderMoves: penalize unsafe minor-piece capture by SEE', a, seeA, moverA.t); } catch(e){}
+                    }
+                  }
+                } catch (e) {}
+              }
+              if (occB) {
+                try {
+                  const seeB = staticExchangeEval(pieces, b.x, b.y, b.z, side);
+                  if (seeB >= 0) {
+                    scoreB += 1200;
+                    try { console.debug('orderMoves: favorable trade (SEE) for', b, seeB); } catch(e){}
+                  } else {
+                    const moverB = (pieces || []).find(pp => pp.id === b.moverId) || null;
+                    if (moverB && (moverB.t === 'B' || moverB.t === 'N')) {
+                      scoreB -= 3000;
+                      try { console.debug('orderMoves: penalize unsafe minor-piece capture by SEE', b, seeB, moverB.t); } catch(e){}
+                    }
+                  }
+                } catch (e) {}
+              }
+            } catch (e) {}
+          } catch (e) {}
+          return scoreB - scoreA;
+        });
+      }, [simulateMove, attackersOfSquare, moveHistory, lastMove, getAllLegalMoves]);
+      // helper: perform a move programmatically (moverId + target)
+      const applyMove = useCallback((moverId, finalTarget) => {
+        try { console.debug('applyMove enter', { moverId, finalTarget, moveLock: moveLockRef.current }); } catch (e) {}
+        if (moveLockRef.current) { try { console.debug('applyMove early return: moveLock active', { moverId }); } catch (e) {} return; }
+        moveLockRef.current = true;
+        try { (typeof pushStateSnapshot !== 'undefined') && pushStateSnapshot(); } catch (e) {}
+        try {
+          // compute stable snapshot and notation BEFORE mutating state to avoid races
+          const snapPieces = (prevPiecesRef.current && prevPiecesRef.current.length) ? prevPiecesRef.current : (piecesState || []);
+          let moverBeforeSnap = null;
+          try { moverBeforeSnap = snapPieces.find(p => p.id === moverId) || null; } catch (e) { moverBeforeSnap = null; }
+          let finalNotationComputed = '';
+          try {
+            // always compute notation from stable pre-move snapshot to avoid races
+            finalNotationComputed = generateMoveNotation(moverBeforeSnap, finalTarget, snapPieces) || '';
+          } catch (e) { finalNotationComputed = '' }
+
+          // perform state mutation
+          setPiecesState((prev) => {
+            const mover = prev.find(pp => pp.id === moverId);
+            if (!mover) return prev;
+            const movingColor = mover.color;
+            let withoutCaptured;
+            try {
+              if (finalTarget && finalTarget.enPassant && finalTarget.capturedId) {
+                withoutCaptured = prev.filter(pp => pp.id !== finalTarget.capturedId);
+              } else {
+                withoutCaptured = prev.filter(pp => !(pp.x === finalTarget.x && pp.y === finalTarget.y && pp.z === finalTarget.z && pp.color !== movingColor));
+              }
+              const next = withoutCaptured.map((pp) => {
+                if (pp.id === moverId) return { ...pp, x: finalTarget.x, y: finalTarget.y, z: finalTarget.z, hasMoved: true };
+                if (finalTarget && finalTarget.castle) {
+                  // primary: match rook by explicit id
+                  if (pp.id === finalTarget.castle.rookId) {
+                    const originalRookTo = finalTarget.castle.rookTo;
+                    let safeRookTo = originalRookTo;
+                    try {
+                      if (originalRookTo && finalTarget && typeof finalTarget.x === 'number' && typeof originalRookTo.x === 'number') {
+                        if (originalRookTo.x === finalTarget.x && originalRookTo.y === finalTarget.y && originalRookTo.z === finalTarget.z) {
+                          safeRookTo = { x: mover.x, y: mover.y, z: mover.z };
+                        }
+                      }
+                    } catch (e) {}
+                    if (safeRookTo) return { ...pp, x: safeRookTo.x, y: safeRookTo.y, z: safeRookTo.z, hasMoved: true };
+                  }
+                  // fallback: if rookId didn't match (possible mismatch), fall back to matching rookFrom coords
+                  try {
+                    const rf = finalTarget.castle.rookFrom;
+                    if (rf && pp.x === rf.x && pp.y === rf.y && pp.z === rf.z) {
+                      const originalRookTo = finalTarget.castle.rookTo;
+                      let safeRookTo = originalRookTo;
+                      try {
+                        if (originalRookTo && finalTarget && typeof finalTarget.x === 'number' && typeof originalRookTo.x === 'number') {
+                          if (originalRookTo.x === finalTarget.x && originalRookTo.y === finalTarget.y && originalRookTo.z === finalTarget.z) {
+                            safeRookTo = { x: mover.x, y: mover.y, z: mover.z };
+                          }
+                        }
+                      } catch (e) {}
+                      if (safeRookTo) return { ...pp, x: safeRookTo.x, y: safeRookTo.y, z: safeRookTo.z, hasMoved: true };
+                    }
+                  } catch (e) {}
+                }
+                return pp;
+              });
+              return next;
+            } catch (e) { return prev; }
+          });
+
+          // notation and history using the precomputed stable notation
+          try {
+            try { console.debug('applyMove notation computed', { moverId: moverId, moverBefore: moverBeforeSnap, finalTarget, finalNotation: finalNotationComputed }); } catch (e) {}
+            if (finalNotationComputed) {
+              const side = moverBeforeSnap ? moverBeforeSnap.color : null;
+              setMoveHistory(prev => {
+                const copy = prev ? prev.slice() : [];
+                if (side === 'white') {
+                  const last = copy.length ? copy[copy.length - 1] : null;
+                  if (last && last.white === finalNotationComputed) return copy;
+                  copy.push({ white: finalNotationComputed, black: null });
+                } else if (side === 'black') {
+                  if (copy.length === 0) copy.push({ white: null, black: finalNotationComputed });
+                  else copy[copy.length - 1] = { ...copy[copy.length - 1], black: finalNotationComputed };
+                }
+                try { console.debug('applyMove moveHistory updated', { beforeLen: prev ? prev.length : 0, afterLen: copy.length, copyLast: copy[copy.length - 1] }); } catch (e) {}
+                return copy;
+              });
+            } else {
+              try { console.debug('applyMove: no notation generated', { moverId: moverId, moverBefore: moverBeforeSnap, finalTarget }); } catch (e) {}
+            }
+          } catch (e) { console.debug('applyMove history error', e); }
+
+          setSelectedPieceId(null);
+          setCurrentTurn((prev) => (prev === 'white' ? 'black' : 'white'));
+
+          // set lastMove for double-step pawns based on snapshot mover
+          try {
+            if (moverBeforeSnap && moverBeforeSnap.t === 'p') {
+              const dx = Math.abs(finalTarget.x - moverBeforeSnap.x);
+              if (dx === 2) {
+                const lm = { id: moverBeforeSnap.id, from: { x: moverBeforeSnap.x, y: moverBeforeSnap.y, z: moverBeforeSnap.z }, to: { x: finalTarget.x, y: finalTarget.y, z: finalTarget.z }, doubleStep: true };
+                setLastMove(lm);
+              } else setLastMove(null);
+            } else setLastMove(null);
+          } catch (e) { setLastMove(null); }
+        } finally {
+          moveLockRef.current = false;
+        }
+      }, [piecesState, setPiecesState, setMoveHistory, setSelectedPieceId, setCurrentTurn, setLastMove, pushStateSnapshot, generateMoveNotation]);
+
+      // take-back: undo last ply (or last two plies if playing against AI)
+      const takeBack = useCallback(() => {
+        try {
+          if (!statesHistoryRef.current || statesHistoryRef.current.length === 0) return;
+          try { console.debug('takeBack invoked, snapshot depth before pop:', statesHistoryRef.current.length, 'aiSide:', aiSide); } catch (e) {}
+          const toPop = aiSide ? 2 : 1;
+          let restored = null;
+          for (let i = 0; i < toPop; i++) {
+            if (statesHistoryRef.current.length === 0) break;
+            restored = statesHistoryRef.current.pop();
+          }
+          try { console.debug('takeBack popped, snapshot depth after pop:', statesHistoryRef.current.length); } catch (e) {}
+          if (!restored) return;
+          try { if (typeof pushDebug === 'function') pushDebug('takeBackPopped', { restoredHas: !!restored, depth: statesHistoryRef.current.length }); } catch (e) {}
+          // restore full state
+          try { setPiecesState(restored.piecesState || []); } catch (e) {}
+          try { setMoveHistory(restored.moveHistory || []); } catch (e) {}
+          try { setCurrentTurn(restored.currentTurn || 'white'); } catch (e) {}
+          try { setLastMove(restored.lastMove || null); } catch (e) {}
+          // also restore aiSide/gameStarted to avoid logic mismatches after undo
+          try { setAiSide(restored.aiSide || null); } catch (e) {}
+          try { setGameStarted(!!restored.gameStarted); } catch (e) {}
+          // update refs to reflect restored state
+          try { prevPiecesRef.current = (restored.piecesState || []).map(p => ({ ...p })); } catch (e) {}
+          try { prevMoveHistoryRef.current = (restored.moveHistory || []).slice(); } catch (e) {}
+          // persist immediately
+          try { saveToServerImmediate({ piecesState: restored.piecesState, moveHistory: restored.moveHistory, currentTurn: restored.currentTurn, lastMove: restored.lastMove, aiSide: restored.aiSide, gameStarted: restored.gameStarted }); } catch (e) { console.debug('immediate save after takeBack failed', e); }
+          try { console.debug('takeBack restored state', { currentTurn: restored.currentTurn, moveHistoryLen: (restored.moveHistory||[]).length, aiSide: restored.aiSide, gameStarted: restored.gameStarted }); } catch (e) {}
+          try { if (typeof pushDebug === 'function') pushDebug('takeBackRestored', { currentTurn: restored.currentTurn, moveHistoryLen: (restored.moveHistory||[]).length, aiSide: restored.aiSide, gameStarted: restored.gameStarted }); } catch (e) {}
+        } catch (e) { console.debug('takeBack failed', e); }
+      }, [aiSide, gameStarted, saveToServerImmediate]);
 
       // derive lastMove by diffing piecesState changes so it's always accurate
       useEffect(() => {
@@ -1570,8 +2681,13 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       useEffect(() => {
         try {
           console.debug('piecesState changed. count:', piecesState.length, 'currentTurn:', currentTurn);
+          try { pushDebug('piecesStateChanged', { count: piecesState.length, currentTurn }); } catch (e) {}
         } catch (e) {}
       }, [piecesState, currentTurn]);
+
+      useEffect(() => {
+        try { pushDebug('moveHistoryChanged', { moveHistory }); } catch (e) {}
+      }, [moveHistory]);
 
       // compute check / checkmate / double-check status whenever board or turn changes
       useEffect(() => {
@@ -1632,6 +2748,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
       // camera / controls persistence
       const controlsRef = useRef();
+      const importInputRef = useRef(null);
       // prefer explicit saved defaults if present; otherwise fall back to last-used camPos
       const [camPos, setCamPos] = useState(() => {
         try {
@@ -1659,6 +2776,1197 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         }
       }, [controlsRef, camPos, camTarget]);
 
+      // R3F helper: directly resize renderer and camera on window resize/unmaximize
+      function R3FResize() {
+        const { gl, camera } = useThree();
+        useEffect(() => {
+          const handler = () => {
+            try { console.debug('R3FResize handler invoked'); } catch (e) {}
+            try {
+              const canvas = gl && gl.domElement;
+              if (!canvas) return;
+              // prefer the main container size to avoid transient zero-width during window transitions
+              const main = document.querySelector('.main');
+              let w, h;
+              if (main) {
+                w = Math.max(1, Math.floor(main.clientWidth));
+                h = Math.max(1, Math.floor(main.clientHeight));
+              } else {
+                const rect = canvas.getBoundingClientRect();
+                w = Math.max(1, Math.floor(rect.width));
+                h = Math.max(1, Math.floor(rect.height));
+              }
+              // explicitly set renderer size and pixel ratio
+              try { gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); } catch (e) {}
+              try { gl.setSize(w, h, false); } catch (e) {}
+              // update camera aspect
+              if (camera && typeof camera.aspect === 'number') {
+                camera.aspect = w / h;
+                try { camera.updateProjectionMatrix(); } catch (e) {}
+              }
+            } catch (e) {}
+          };
+          window.addEventListener('resize', handler);
+          window.addEventListener('chess3d:resize', handler);
+          // run a few times to stabilize after layout changes
+          try { console.debug('R3FResize mounted'); } catch (e) {}
+          setTimeout(handler, 50);
+          setTimeout(handler, 200);
+          setTimeout(handler, 500);
+          return () => { window.removeEventListener('resize', handler); window.removeEventListener('chess3d:resize', handler); };
+        }, [gl, camera]);
+        return null;
+      }
+
+      // remount the Canvas after a resize finishes (debounced) to emulate full-refresh initialization
+      useEffect(() => {
+        const timer = { id: null };
+        const handler = () => {
+          try {
+            if (timer.id) clearTimeout(timer.id);
+            timer.id = setTimeout(() => {
+              try { setCanvasKey(k => k + 1); } catch (e) {}
+              timer.id = null;
+            }, 250);
+          } catch (e) {}
+        };
+        window.addEventListener('resize', handler);
+        return () => { window.removeEventListener('resize', handler); if (timer.id) clearTimeout(timer.id); };
+      }, []);
+
+      // Persistence helpers
+      const SAVE_KEY = 'chess3d:local_state';
+      const SERVER_ID_KEY = 'chess3d:server_id';
+      const SERVER_TOKEN_KEY = 'chess3d:server_token';
+
+      const exportGame = () => {
+        try {
+          // build a human-readable move notation array for easier inspection
+          const moveNotation = (moveHistory || []).map((mv, idx) => {
+            const white = mv && mv.white ? mv.white : '';
+            const black = mv && mv.black ? mv.black : '';
+            const left = `${idx + 1}. ${white}`.trim();
+            return black ? `${left} ${black}` : left;
+          });
+          const payload = { piecesState, moveHistory, moveNotation, currentTurn, lastMove, aiSide, gameStarted };
+          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `chess3d-save-${new Date().toISOString()}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        } catch (e) { console.debug('export error', e); }
+      };
+
+      const importGame = async (file) => {
+        try {
+          const text = await file.text();
+          const obj = JSON.parse(text);
+          if (obj && obj.piecesState) {
+            setPiecesState(obj.piecesState);
+            setMoveHistory(obj.moveHistory || []);
+            setCurrentTurn(obj.currentTurn || 'white');
+            setLastMove(obj.lastMove || null);
+            try { setAiSide(obj.aiSide || null); } catch (e) {}
+            try { setGameStarted(!!obj.gameStarted); } catch (e) {}
+            alert('Game imported');
+          } else alert('Invalid file');
+        } catch (e) { alert('Import failed'); }
+      };
+
+      const saveToLocal = () => {
+        try {
+          const payload = { piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted };
+          localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+          alert('Saved locally');
+        } catch (e) { alert('Local save failed'); }
+      };
+
+      const loadFromLocal = () => {
+        try {
+          const txt = localStorage.getItem(SAVE_KEY);
+          if (!txt) { alert('No local save'); return; }
+          const obj = JSON.parse(txt);
+          setPiecesState(obj.piecesState || []);
+          setMoveHistory(obj.moveHistory || []);
+          setCurrentTurn(obj.currentTurn || 'white');
+          setLastMove(obj.lastMove || null);
+          try { setAiSide(obj.aiSide || null); } catch (e) {}
+          try { setGameStarted(!!obj.gameStarted); } catch (e) {}
+        } catch (e) { alert('Local load failed'); }
+      };
+
+      const saveToServer = async () => {
+        try {
+          const payload = { state: { piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted } };
+          const existingId = localStorage.getItem(SERVER_ID_KEY);
+          const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
+          if (existingId) {
+            // update
+            const resp = await fetch(`/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state, ownerToken }) });
+            if (!resp.ok) throw new Error('update failed');
+            console.log('Saved to server (updated)');
+            return;
+          }
+          const resp = await fetch('/api/games', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
+          if (!resp.ok) throw new Error('save failed');
+          const j = await resp.json();
+          if (j.id && j.ownerToken) {
+            localStorage.setItem(SERVER_ID_KEY, j.id);
+            localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
+            console.log(`Saved to server. ID: ${j.id}`);
+          }
+        } catch (e) { alert('Server save failed'); }
+      };
+
+      // immediate save helper that accepts an explicit state object to avoid races
+      async function saveToServerImmediate(explicitState) {
+        try {
+          const payloadState = explicitState || { piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted };
+          try { console.log('saveToServerImmediate payloadState', payloadState); } catch (e) {}
+          const existingId = localStorage.getItem(SERVER_ID_KEY);
+          const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
+          if (existingId) {
+            const resp = await fetch(`/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState, ownerToken }) });
+            if (!resp.ok) throw new Error('update failed');
+            console.log('Saved to server (updated)');
+            return;
+          }
+          const resp = await fetch('/api/games', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState }) });
+          if (!resp.ok) throw new Error('save failed');
+          const j = await resp.json();
+          if (j.id && j.ownerToken) {
+            localStorage.setItem(SERVER_ID_KEY, j.id);
+            localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
+            console.log(`Saved to server. ID: ${j.id}`);
+          }
+        } catch (e) { console.debug('server immediate save failed', e); }
+      }
+
+      
+
+      // debug: log moveHistory whenever it changes
+      useEffect(() => {
+        try { console.log('moveHistory state now', moveHistory); } catch (e) {}
+      }, [moveHistory]);
+
+      const loadFromServer = async (idPrompt) => {
+        try {
+          const id = idPrompt || prompt('Enter game id to load:');
+          if (!id) return;
+          const resp = await fetch(`/api/games/${id}`);
+          if (!resp.ok) { alert('Load failed'); return; }
+          const j = await resp.json();
+          if (j && j.state) {
+            const s = j.state;
+            setPiecesState(s.piecesState || []);
+            setMoveHistory(s.moveHistory || []);
+            setCurrentTurn(s.currentTurn || 'white');
+            setLastMove(s.lastMove || null);
+            try { setAiSide(s.aiSide || null); } catch (e) {}
+            try { setGameStarted(!!s.gameStarted); } catch (e) {}
+            // store id/token for future updates
+            if (j.id && j.ownerToken) {
+              localStorage.setItem(SERVER_ID_KEY, j.id);
+              localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
+            }
+            alert('Loaded from server');
+          }
+        } catch (e) { alert('Server load failed'); }
+      };
+
+      // auto-load server save if present
+      const suppressAutoSaveRef = useRef(false);
+      useEffect(() => {
+        (async () => {
+          try {
+            const id = localStorage.getItem(SERVER_ID_KEY);
+            if (id) {
+              suppressAutoSaveRef.current = true;
+              await loadFromServer(id);
+              // allow a short grace period before auto-saving again
+              setTimeout(() => { suppressAutoSaveRef.current = false; }, 100);
+            }
+          } catch (e) {}
+        })();
+      }, []);
+
+      // autosave to server after moves/pieces change (debounced)
+      useEffect(() => {
+        if (suppressAutoSaveRef.current) return;
+        const timer = setTimeout(() => {
+          try { saveToServer(); } catch (e) { console.debug('autosave failed', e); }
+        }, 500);
+        return () => clearTimeout(timer);
+      }, [piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted]);
+
+      // AI player: when currentTurn matches aiSide, compute and play a move
+      // Improved AI: negamax with alpha-beta, iterative deepening, move ordering
+
+      // Negamax search with alpha-beta pruning (cleaner than minimax with maximizing flag)
+      const negamax = useCallback((pieces, color, depth, alpha, beta, plyFromRoot = 0) => {
+        // time cutoff
+        try { if (searchStateRef.current && Date.now() > searchStateRef.current.endTime) return evaluatePosition(pieces, color); } catch (e) {}
+        
+        // Mate distance pruning: prefer shorter mates
+        if (plyFromRoot > 0) {
+          alpha = Math.max(alpha, -100000 + plyFromRoot);
+          beta = Math.min(beta, 100000 - plyFromRoot);
+          if (alpha >= beta) return alpha;
+        }
+
+        // terminal checks
+        const moves = getAllLegalMoves(pieces, color) || [];
+        if (depth === 0 || moves.length === 0) {
+          // if no moves, return checkmate or stalemate score
+          if (moves.length === 0) {
+            const inCheck = isAnyKingInCheck(pieces, color);
+            return inCheck ? (-100000 + plyFromRoot) : 0; // checkmate or stalemate
+          }
+          // use quiescence search at leaf to resolve capture sequences
+          try {
+            return quiescenceSearch(pieces, color, alpha, beta, 4);
+          } catch (e) {
+            return evaluatePosition(pieces, color);
+          }
+        }
+
+        const nextColor = color === 'white' ? 'black' : 'white';
+        let value = -Infinity;
+        const ordered = orderMoves(moves, pieces, color);
+        
+        for (const m of ordered) {
+          try { if (searchStateRef.current && Date.now() > searchStateRef.current.endTime) return evaluatePosition(pieces, color); } catch (e) {}
+          const next = simulateMove(pieces, m.moverId, { x: m.x, y: m.y, z: m.z });
+          const score = -negamax(next, nextColor, depth - 1, -beta, -alpha, plyFromRoot + 1);
+          value = Math.max(value, score);
+          alpha = Math.max(alpha, value);
+          if (alpha >= beta) break; // beta cutoff
+        }
+        return value;
+      }, [getAllLegalMoves, simulateMove, isAnyKingInCheck, evaluatePosition, orderMoves]);
+
+      // Quiescence search: explore capture sequences so static eval isn't fooled by immediate captures
+      const quiescenceSearch = useCallback((pieces, color, alpha, beta, depthLeft) => {
+        // stand-pat evaluation
+        let standPat = evaluatePosition(pieces, color);
+        if (standPat >= beta) return beta;
+        if (alpha < standPat) alpha = standPat;
+        if (depthLeft <= 0) return standPat;
+        
+        // generate capture moves only
+        let captures = [];
+        try {
+          const all = getAllLegalMoves(pieces, color) || [];
+          for (const m of all) {
+            const occ = (pieces || []).find(pp => pp.x === m.x && pp.y === m.y && pp.z === m.z && pp.color !== color);
+            // include en-passant and explicit captures
+            if (occ || (m.enPassant)) captures.push(m);
+          }
+        } catch (e) { captures = []; }
+        
+        // if no captures, return stand-pat
+        if (!captures || captures.length === 0) return standPat;
+        
+        // order captures by victim value
+        captures = orderMoves(captures, pieces, color);
+        const nextColor = color === 'white' ? 'black' : 'white';
+        
+        let value = -Infinity;
+        for (const m of captures) {
+          try { if (searchStateRef.current && Date.now() > searchStateRef.current.endTime) return evaluatePosition(pieces, color); } catch (e) {}
+          const next = simulateMove(pieces, m.moverId, { x: m.x, y: m.y, z: m.z });
+          const score = -quiescenceSearch(next, nextColor, -beta, -alpha, depthLeft - 1);
+          value = Math.max(value, score);
+          alpha = Math.max(alpha, value);
+          if (alpha >= beta) break;
+        }
+        return value;
+      }, [getAllLegalMoves, orderMoves, simulateMove, evaluatePosition]);
+
+      useEffect(() => {
+        if (!aiSide) return;
+        if (gameOver) return;
+        if (currentTurn !== aiSide) return;
+        const thinkDelay = 300 + Math.floor(Math.random() * 400);
+        const t = setTimeout(() => {
+          (async () => {
+            try {
+              let moves = getAllLegalMoves(piecesState, aiSide || 'black');
+              
+              // CRITICAL: Hard filter to completely block early queen moves in opening
+              try {
+                const plyCount = (moveHistory || []).length || 0;
+                const totalPlies = plyCount * 2; // convert to half-moves
+                
+                // Count developed minor pieces (knights and bishops off starting rank)
+                const startRank = aiSide === 'white' ? 7 : 0;
+                const developedMinors = (piecesState || []).filter(p => 
+                  p.color === aiSide && 
+                  (p.t === 'N' || p.t === 'B') && 
+                  p.x !== startRank
+                ).length;
+                
+                // ABSOLUTE BAN on queen moves until move 10+ (totalPlies >= 20)
+                if (totalPlies < 20) {
+                  const beforeFilter = moves.length;
+                  moves = moves.filter(m => {
+                    const mover = (piecesState || []).find(p => p.id === m.moverId);
+                    // Allow only if not a queen, OR if queen is capturing a high-value piece (R/Q)
+                    if (mover && mover.t === 'Q') {
+                      const target = (piecesState || []).find(p => p.x === m.x && p.y === m.y && p.z === m.z && p.color !== aiSide);
+                      const isHighValueCapture = target && (target.t === 'Q' || target.t === 'R');
+                      if (!isHighValueCapture) {
+                        console.log(`AI: BLOCKED early queen move to ${m.x},${m.y},${m.z} (totalPlies=${totalPlies}, must wait until move 10+)`);
+                        return false; // BLOCK IT
+                      }
+                    }
+                    return true;
+                  });
+                  if (beforeFilter !== moves.length) {
+                    console.log(`AI: Filtered out ${beforeFilter - moves.length} early queen moves, ${moves.length} moves remain`);
+                  }
+                }
+                
+                // BLOCK pointless queen shuffling on back rank (beginner move with no purpose)
+                const beforeBackRankFilter = moves.length;
+                moves = moves.filter(m => {
+                  const mover = (piecesState || []).find(p => p.id === m.moverId);
+                  if (mover && mover.t === 'Q' && mover.x === startRank && m.x === startRank) {
+                    // Queen moving along back rank - only allow if defending an attacked piece
+                    const target = (piecesState || []).find(p => p.x === m.x && p.y === m.y && p.z === m.z);
+                    if (!target) {
+                      // Not capturing, check if this defends anything meaningful
+                      let hasDefensivePurpose = false;
+                      try {
+                        const nextPieces = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                        for (const p of nextPieces) {
+                          if (p.color === aiSide && p.id !== m.moverId) {
+                            const defendersBefore = attackersOfSquare(piecesState, p.x, p.y, p.z).filter(a => a.color === aiSide).length;
+                            const defendersAfter = attackersOfSquare(nextPieces, p.x, p.y, p.z).filter(a => a.color === aiSide).length;
+                            if (defendersAfter > defendersBefore) {
+                              hasDefensivePurpose = true;
+                              break;
+                            }
+                          }
+                        }
+                      } catch (e) {}
+                      
+                      if (!hasDefensivePurpose) {
+                        console.log(`AI: BLOCKED pointless queen shuffle on back rank from ${mover.y},${mover.z} to ${m.y},${m.z}`);
+                        return false; // BLOCK IT
+                      }
+                    }
+                  }
+                  return true;
+                });
+                if (beforeBackRankFilter !== moves.length) {
+                  console.log(`AI: Filtered out ${beforeBackRankFilter - moves.length} pointless queen back-rank shuffles`);
+                }
+              } catch (e) {
+                console.error('AI: Early queen filter error', e);
+              }
+              
+              // CRITICAL: Hard filter to block early rook moves (ruins castling, wastes tempo)
+              try {
+                const plyCount = (moveHistory || []).length || 0;
+                const totalPlies = plyCount * 2;
+                
+                // Count developed pieces
+                const startRank = aiSide === 'white' ? 7 : 0;
+                const developedMinors = (piecesState || []).filter(p => 
+                  p.color === aiSide && 
+                  (p.t === 'N' || p.t === 'B') && 
+                  p.x !== startRank
+                ).length;
+                
+                const movedPawns = (piecesState || []).filter(p => 
+                  p.color === aiSide && 
+                  p.t === 'p' && 
+                  p.hasMoved
+                ).length;
+                
+                // Check if we've castled yet
+                const kingPiece = (piecesState || []).find(p => p.color === aiSide && p.t === 'K');
+                const hasCastled = kingPiece && kingPiece.hasMoved; // simplified check
+                
+                // BLOCK rook moves if:
+                // - Before move 10 AND
+                // - Haven't developed at least 2 minor pieces AND
+                // - Haven't castled yet
+                if (totalPlies < 20 && developedMinors < 2 && !hasCastled) {
+                  const beforeFilter = moves.length;
+                  moves = moves.filter(m => {
+                    const mover = (piecesState || []).find(p => p.id === m.moverId);
+                    if (mover && mover.t === 'R') {
+                      // Allow only if capturing a valuable piece
+                      const target = (piecesState || []).find(p => p.x === m.x && p.y === m.y && p.z === m.z && p.color !== aiSide);
+                      const isGoodCapture = target && (target.t === 'Q' || target.t === 'R' || target.t === 'B' || target.t === 'N');
+                      if (!isGoodCapture) {
+                        console.log(`AI: BLOCKED early rook move to ${m.x},${m.y},${m.z} (developedMinors=${developedMinors}, hasCastled=${hasCastled}, totalPlies=${totalPlies})`);
+                        return false; // BLOCK IT
+                      }
+                    }
+                    return true;
+                  });
+                  if (beforeFilter !== moves.length) {
+                    console.log(`AI: Filtered out ${beforeFilter - moves.length} early rook moves`);
+                  }
+                }
+              } catch (e) {
+                console.error('AI: Early rook filter error', e);
+              }
+              
+              // CRITICAL: Hard filter to block moving the same piece twice before development
+              try {
+                const plyCount = (moveHistory || []).length || 0;
+                const totalPlies = plyCount * 2;
+                
+                // Count undeveloped minor pieces (knights/bishops on starting rank)
+                const startRank = aiSide === 'white' ? 7 : 0;
+                const undevelopedMinors = (piecesState || []).filter(p => 
+                  p.color === aiSide && 
+                  (p.t === 'N' || p.t === 'B') && 
+                  p.x === startRank
+                ).length;
+                
+                // BLOCK moving any piece that has already moved if we have undeveloped minors
+                if (undevelopedMinors > 0 && totalPlies < 24) {
+                  const beforeFilter = moves.length;
+                  moves = moves.filter(m => {
+                    const mover = (piecesState || []).find(p => p.id === m.moverId);
+                    if (mover && mover.hasMoved && mover.t !== 'K') {
+                      // Exceptions: allow if capturing valuable piece or escaping threat
+                      const target = (piecesState || []).find(p => p.x === m.x && p.y === m.y && p.z === m.z && p.color !== aiSide);
+                      const vals = { p: 1, N: 3, B: 3, R: 5, Q: 9 };
+                      const targetValue = target ? (vals[target.t] || 0) : 0;
+                      const isCapturingValuable = targetValue >= 3; // knight or better
+                      
+                      let isEscapingThreat = false;
+                      try {
+                        const attackers = attackersOfSquare(piecesState, mover.x, mover.y, mover.z).filter(a => a.color !== aiSide).length;
+                        const defenders = attackersOfSquare(piecesState, mover.x, mover.y, mover.z).filter(a => a.color === aiSide).length;
+                        isEscapingThreat = (attackers > defenders);
+                      } catch (e) {}
+                      
+                      if (!isCapturingValuable && !isEscapingThreat) {
+                        console.log(`AI: BLOCKED moving same ${mover.t} twice (from ${mover.x},${mover.y},${mover.z} to ${m.x},${m.y},${m.z}) - undeveloped minors: ${undevelopedMinors}`);
+                        return false; // BLOCK IT
+                      }
+                    }
+                    return true;
+                  });
+                  if (beforeFilter !== moves.length) {
+                    console.log(`AI: Filtered out ${beforeFilter - moves.length} repeat moves, ${moves.length} moves remain`);
+                  }
+                }
+              } catch (e) {
+                console.error('AI: Repeat move filter error', e);
+              }
+              
+              // Hard-ban early non-castling king moves if castling is currently available
+              try {
+                const plyCount = (moveHistory || []).length || 0;
+                // consider castling rights possible if king and at least one rook haven't moved (even if castling isn't legal right now)
+                const kingPiece = (piecesState || []).find(p => p.color === aiSide && p.t === 'K');
+                const rookExists = (piecesState || []).some(p => p.color === aiSide && p.t === 'R' && !p.hasMoved);
+                const castleAvailable = kingPiece && !kingPiece.hasMoved && rookExists;
+                if (castleAvailable && plyCount < 12) {
+                  const nonKing = (moves || []).filter(m => {
+                    try {
+                      const pm = (piecesState || []).find(p => p.id === m.moverId) || null;
+                      if (!pm) return true;
+                      // allow castling moves, disallow other king moves
+                      if (pm.t === 'K' && !(m && m.castle)) return false;
+                      return true;
+                    } catch (e) { return true; }
+                  });
+                  if (nonKing.length > 0) {
+                    try { console.debug('AI filtered out early non-castling king moves to preserve castling', { before: moves.length, after: nonKing.length }); } catch (e) {}
+                    moves = nonKing;
+                  }
+                }
+              } catch (e) {}
+              if (!moves || moves.length === 0) return;
+
+              // Opening book reply (best-effort, safe-guarded)
+              try {
+                const openingMap = {
+                  '3c4': '3c5', '3b4': '3b5', '2b4': '2b5', '2c4': '2c5', '2a4': '2c5', '2d4': '2b5',
+                  '3a4': '3c5', '3d4': '3b5', 'N1c3': '2c5', 'N2b3': '2c5', 'N2c3': '2c5', 'N3d3': '2b5',
+                  'N4b3': '3b5', 'N3c3': '3b5'
+                };
+                const parseNotation = (s) => {
+                  if (!s || typeof s !== 'string') return null;
+                  const m = s.match(/^([1-4])([a-d])([1-8])$/);
+                  if (!m) return null;
+                  const z = Number(m[1]) - 1;
+                  const y = m[2].charCodeAt(0) - 'a'.charCodeAt(0);
+                  const x = 8 - Number(m[3]);
+                  return { x, y, z };
+                };
+                const lastEntry = (moveHistory && moveHistory.length) ? moveHistory[moveHistory.length - 1] : null;
+                if (lastEntry && moveHistory.length == 1) {
+                  const lastNotationRaw = (aiSide === 'black') ? lastEntry.white : lastEntry.black;
+                  let lastNotation = lastNotationRaw;
+                  try { if (lastNotation) lastNotation = lastNotation.replace(/\([^\)]*\)/g, '').replace(/x/g, '').trim(); } catch (e) {}
+                  if (lastNotation) {
+                    let matched = null; let reply = null; let usedMirror = false;
+                    if (openingMap[lastNotation]) { matched = lastNotation; reply = openingMap[lastNotation]; }
+                    else {
+                      try {
+                        const mm = (lastNotation || '').match(/^([NBRQK]?)([1-4][a-d][1-8])$/i);
+                        if (mm) {
+                          const prefix = mm[1] || '';
+                          const core = mm[2];
+                          const parsed = parseNotation(core);
+                          if (parsed) {
+                            const mirrored = { x: 7 - parsed.x, y: parsed.y, z: parsed.z };
+                            const mirroredKey = prefix + (mirrored.z + 1) + String.fromCharCode('a'.charCodeAt(0) + mirrored.y) + (8 - mirrored.x);
+                            if (openingMap[mirroredKey]) { matched = mirroredKey; reply = openingMap[mirroredKey]; usedMirror = true; }
+                          }
+                        }
+                      } catch (e) {}
+                    }
+                    // if nothing matched and this is Black's first automatic reply, default to 3c5
+                    try {
+                      if (!matched && aiSide === 'black' && (!moveHistory || moveHistory.length === 1)) {
+                        matched = '3c5'; reply = '3c5'; usedMirror = false;
+                      }
+                    } catch (e) {}
+
+                    if (matched && reply) {
+                      let coord = parseNotation(reply);
+                      if (coord) {
+                        if (usedMirror) coord = { x: 7 - coord.x, y: coord.y, z: coord.z };
+                      }
+                      const candidate = moves.find(m => m.x === coord.x && m.y === coord.y && m.z === coord.z);
+                      if (candidate) {
+                        try {
+                          const nextTmp = simulateMove(piecesState, candidate.moverId, { x: candidate.x, y: candidate.y, z: candidate.z });
+                          const opp = aiSide === 'white' ? 'black' : 'white';
+                          const oppMovesTmp = getAllLegalMoves(nextTmp, opp) || [];
+                          let unsafe = false;
+                          for (const oc of oppMovesTmp) {
+                            const targetOcc = nextTmp.find(pp => pp.x === oc.x && pp.y === oc.y && pp.z === oc.z && pp.color === aiSide);
+                            if (!targetOcc) continue;
+                            try { if (staticExchangeEval(nextTmp, oc.x, oc.y, oc.z, opp) > 0) { unsafe = true; break; } } catch (e) {}
+                          }
+                          try { console.debug('AI opening book reply playing', { reply, candidate, unsafe }); } catch (e) {}
+                          applyMove(candidate.moverId, { x: candidate.x, y: candidate.y, z: candidate.z });
+                          return;
+                        } catch (e) { /* skip book reply on any error */ }
+                      }
+                    }
+                  }
+                }
+              } catch (e) {}
+
+              // CRITICAL: FORCE DEVELOPMENT - If we have undeveloped knights or bishops, we MUST move them!
+              // This runs AFTER opening book so book moves (like 3c5 reply) are allowed
+              try {
+                const plyCount = (moveHistory || []).length || 0;
+                const totalPlies = plyCount * 2;
+                const startRank = aiSide === 'white' ? 7 : 0;
+                
+                // Only apply development forcing after the opening book phase (move 2+)
+                if (plyCount >= 2) {
+                  // Find undeveloped minor pieces
+                  const undevelopedMinors = (piecesState || []).filter(p => 
+                    p.color === aiSide && 
+                    (p.t === 'N' || p.t === 'B') && 
+                    p.x === startRank
+                  );
+                  
+                  // MODIFIED: Instead of forcing ONLY development, prefer development + good pawn moves
+                  // Only force pure development if we have most pieces undeveloped (6+ out of 8 in 4D chess)
+                  if (undevelopedMinors.length >= 6 && totalPlies < 12) {
+                    // Find moves that develop knights or bishops
+                    const developmentMoves = moves.filter(m => {
+                      const mover = (piecesState || []).find(p => p.id === m.moverId);
+                      return mover && (mover.t === 'N' || mover.t === 'B') && mover.x === startRank;
+                    });
+                    
+                    // Also allow strategically valuable pawn moves
+                    const goodPawnMoves = moves.filter(m => {
+                      const mover = (piecesState || []).find(p => p.id === m.moverId);
+                      if (!mover || mover.t !== 'p' || mover.hasMoved) return false;
+                      
+                      // Allow ONLY: (1) double-pawn move, OR (2) defends a piece
+                      const moveDist = Math.abs(m.x - mover.x);
+                      const isDouble = moveDist === 2;
+                      
+                      // Check if this pawn move defends another piece
+                      let defendsPiece = false;
+                      try {
+                        const nextPieces = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                        for (const p of nextPieces) {
+                          if (p.color === aiSide && p.id !== m.moverId) {
+                            const defendersBefore = attackersOfSquare(piecesState, p.x, p.y, p.z).filter(a => a.color === aiSide).length;
+                            const defendersAfter = attackersOfSquare(nextPieces, p.x, p.y, p.z).filter(a => a.color === aiSide).length;
+                            if (defendersAfter > defendersBefore) {
+                              defendsPiece = true;
+                              break;
+                            }
+                          }
+                        }
+                      } catch (e) {}
+                      
+                      return isDouble || defendsPiece;
+                    });
+                    
+                    const combinedMoves = [...developmentMoves, ...goodPawnMoves];
+                    if (combinedMoves.length > 0) {
+                      console.log(`AI: Prioritizing development (${developmentMoves.length}) + good pawns (${goodPawnMoves.length}) - ${undevelopedMinors.length}/8 pieces undeveloped`);
+                      moves = combinedMoves;
+                    }
+                  } else if (undevelopedMinors.length > 0 && totalPlies < 24) {
+                    // We have 1-5 undeveloped pieces: allow both development AND good pawn moves
+                    const developmentMoves = moves.filter(m => {
+                      const mover = (piecesState || []).find(p => p.id === m.moverId);
+                      return mover && (mover.t === 'N' || mover.t === 'B') && mover.x === startRank;
+                    });
+                    
+                    const goodPawnMoves = moves.filter(m => {
+                      const mover = (piecesState || []).find(p => p.id === m.moverId);
+                      if (!mover || mover.t !== 'p' || mover.hasMoved) return false;
+                      
+                      // Allow ONLY: (1) double-pawn move, OR (2) defends a piece
+                      const moveDist = Math.abs(m.x - mover.x);
+                      const isDouble = moveDist === 2;
+                      
+                      // Check if this pawn move defends another piece
+                      let defendsPiece = false;
+                      try {
+                        const nextPieces = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                        for (const p of nextPieces) {
+                          if (p.color === aiSide && p.id !== m.moverId) {
+                            const defendersBefore = attackersOfSquare(piecesState, p.x, p.y, p.z).filter(a => a.color === aiSide).length;
+                            const defendersAfter = attackersOfSquare(nextPieces, p.x, p.y, p.z).filter(a => a.color === aiSide).length;
+                            if (defendersAfter > defendersBefore) {
+                              defendsPiece = true;
+                              break;
+                            }
+                          }
+                        }
+                      } catch (e) {}
+                      
+                      return isDouble || defendsPiece;
+                    });
+                    
+                    const combinedMoves = [...developmentMoves, ...goodPawnMoves];
+                    if (combinedMoves.length > 0) {
+                      console.log(`AI: Mixing development (${developmentMoves.length}) + good pawns (${goodPawnMoves.length}) - ${undevelopedMinors.length}/8 pieces remain`);
+                      moves = combinedMoves;
+                    }
+                  }
+                }
+              } catch (e) {
+                console.error('AI: Force development filter error', e);
+              }
+
+              // iterative deepening search with safety heuristics
+              const maxMillis = 1200; // Increased from 800 to allow deeper search for tactics
+              searchStateRef.current.endTime = Date.now() + maxMillis;
+              const maxDepth = 4;
+              let best = null; let bestScore = -Infinity;
+              let orderedMoves = orderMoves(moves, piecesState, aiSide);
+              // Diagnostic: snapshot ordered moves with basic SEE/attackers info for each candidate
+              try {
+                const opponent = aiSide === 'white' ? 'black' : 'white';
+                const snap = [];
+                for (const m of orderedMoves) {
+                  try {
+                    const mover = (piecesState || []).find(p => p.id === m.moverId) || null;
+                    const next = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                    const attackers = attackersOfSquare(next, m.x, m.y, m.z).filter(a => a.color !== aiSide).length;
+                    const defenders = attackersOfSquare(next, m.x, m.y, m.z).filter(a => a.color === aiSide).length;
+                    const oppMoves = getAllLegalMoves(next, opponent) || [];
+                    const captures = oppMoves.filter(oc => oc.x === m.x && oc.y === m.y && oc.z === m.z);
+                    let bestSee = null;
+                    for (const oc of captures) {
+                      try { const s = staticExchangeEval(next, oc.x, oc.y, oc.z, opponent); if (typeof s === 'number' && (bestSee == null || s > bestSee)) bestSee = s; } catch (e) { bestSee = 'ERR'; }
+                    }
+                    snap.push({ moverId: m.moverId, type: mover ? mover.t : '?', from: {x: mover ? mover.x : null, y: mover ? mover.y : null, z: mover ? mover.z : null}, to: {x: m.x,y: m.y,z: m.z}, attackers, defenders, bestSee });
+                  } catch (e) { snap.push({ moverId: m.moverId, to: {x: m.x,y: m.y,z: m.z}, err: true }); }
+                }
+                try { pushDebug('orderedMovesSnapshot', { snap, moveHistoryLen: (moveHistory||[]).length }); } catch (e) {}
+                try { console.log('orderedMovesSnapshot', snap); } catch (e) {}
+              } catch (e) {}
+
+              // Strict immediate-loss veto: remove any move that allows an immediate positive-SEE capture
+              try {
+                const vals = { p: 1, N: 3, B: 3, R: 5, Q: 9, K: 10000 };
+                const opponent = aiSide === 'white' ? 'black' : 'white';
+                const filtered = [];
+                for (const m of orderedMoves) {
+                  try {
+                    const targetBefore = (piecesState || []).find(pp => pp.x === m.x && pp.y === m.y && pp.z === m.z && pp.color !== aiSide) || null;
+                    const n = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                    // is opponent able to capture moved square with positive SEE?
+                    const oppMoves = getAllLegalMoves(n, opponent) || [];
+                    let maxSee = 0; let canCapture = false;
+                    for (const oc of oppMoves) {
+                      if (oc.x === m.x && oc.y === m.y && oc.z === m.z) {
+                        try { const s = staticExchangeEval(n, oc.x, oc.y, oc.z, opponent); if (typeof s === 'number' && s > maxSee) maxSee = s; canCapture = true; } catch (e) { canCapture = true; maxSee = Math.max(maxSee, 0); }
+                      }
+                    }
+                    const attackers = attackersOfSquare(n, m.x, m.y, m.z).filter(a => a.color !== aiSide).length;
+                    const defenders = attackersOfSquare(n, m.x, m.y, m.z).filter(a => a.color === aiSide).length;
+                    let veto = false;
+                    if (canCapture && maxSee > 0 && attackers > defenders) {
+                      // allow if moved piece captures a higher-value piece than the opponent's gain
+                      if (targetBefore && (vals[targetBefore.t] || 0) > maxSee) {
+                        veto = false;
+                      } else {
+                        // allow if this move gives mate to opponent (rare) -- detect: opponent has no legal moves and is in check after their capture? skip veto if mate-in-1 for opponent? conservatively veto
+                        veto = true;
+                      }
+                    }
+                    if (!veto) filtered.push(m);
+                    else { try { console.debug('AI immediate-loss veto removed move', { move: m, maxSee, attackers, defenders, captured: targetBefore && targetBefore.t }); } catch (e) {} }
+                  } catch (e) { filtered.push(m); }
+                }
+                if (filtered.length > 0) orderedMoves = filtered;
+              } catch (e) {}
+
+              // Strong defender-priority: if any Queen/Rook/Knight/Bishop is attacked and can be safely retreated/defended, prioritize those moves
+              try {
+                const highVals = ['Q','R','N','B'];
+                const threatenedPieces = (piecesState || []).filter(p => p.color === aiSide && highVals.includes(p.t) && attackersOfSquare(piecesState, p.x, p.y, p.z).filter(a => a.color !== aiSide).length > 0);
+                if (threatenedPieces.length > 0) {
+                  const rescueMoves = [];
+                  for (const tp of threatenedPieces) {
+                    try {
+                      const myMoves = (getAllLegalMoves(piecesState, aiSide) || []).filter(m => m.moverId === tp.id);
+                      for (const mm of myMoves) {
+                        try {
+                          const n = simulateMove(piecesState, mm.moverId, { x: mm.x, y: mm.y, z: mm.z });
+                          const opponent = aiSide === 'white' ? 'black' : 'white';
+                          const oppMoves = getAllLegalMoves(n, opponent) || [];
+                          let canBeCaptured = false; let maxSee = 0;
+                          for (const oc of oppMoves) {
+                            if (oc.x === mm.x && oc.y === mm.y && oc.z === mm.z) {
+                              try { const s = staticExchangeEval(n, oc.x, oc.y, oc.z, opponent); if (typeof s === 'number') { maxSee = Math.max(maxSee, s); if (s > 0) canBeCaptured = true; } else { canBeCaptured = true; } } catch (e) { canBeCaptured = true; }
+                            }
+                          }
+                          const attackers = attackersOfSquare(n, mm.x, mm.y, mm.z).filter(a => a.color !== aiSide).length;
+                          const defenders = attackersOfSquare(n, mm.x, mm.y, mm.z).filter(a => a.color === aiSide).length;
+                          // consider this a valid rescue if it eliminates positive-SEE capture and defenders >= attackers
+                          if (!canBeCaptured || defenders >= attackers) {
+                            rescueMoves.push(mm);
+                          }
+                        } catch (e) {}
+                      }
+                    } catch (e) {}
+                  }
+                  if (rescueMoves.length > 0) {
+                    try { console.debug('AI defender-priority: prioritizing rescue moves', { rescueCount: rescueMoves.length, threatened: threatenedPieces.map(p=>p.id) }); } catch (e) {}
+                    // move rescues to the front preserving order
+                    orderedMoves = rescueMoves.concat(orderedMoves.filter(m => !rescueMoves.find(r => r.moverId === m.moverId && r.x === m.x && r.y === m.y && r.z === m.z)));
+                  }
+                }
+              } catch (e) {}
+
+              // Mate-threat filter: prefer moves that prevent opponent mate-in-1
+              try {
+                const opponent = aiSide === 'white' ? 'black' : 'white';
+                const evasive = [];
+                for (const m of orderedMoves) {
+                  try {
+                    const next = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                    const oppMoves = getAllLegalMoves(next, opponent) || [];
+                    let leavesMate = false;
+                    for (const om of oppMoves) {
+                      try {
+                        const next2 = simulateMove(next, om.moverId, { x: om.x, y: om.y, z: om.z });
+                        const inCheck = isAnyKingInCheck(next2, aiSide);
+                        const myLegal = (getAllLegalMoves(next2, aiSide) || []);
+                        if (inCheck && myLegal.length === 0) { leavesMate = true; break; }
+                      } catch (e) { /* ignore simulation errors */ }
+                    }
+                    if (!leavesMate) evasive.push(m);
+                  } catch (e) { /* ignore per-move errors */ }
+                }
+                if (evasive.length > 0) {
+                  try { console.debug('AI mate-threat filter applied, reducing moves', { before: orderedMoves.length, after: evasive.length }); } catch (e) {}
+                  orderedMoves = evasive;
+                }
+              } catch (e) { /* fail-safe: ignore mate filter on error */ }
+
+              // High-value piece safety filter: prefer moves that address immediate threats to Q/R
+              try {
+                const highVals = ['Q','R'];
+                const opponent = aiSide === 'white' ? 'black' : 'white';
+                const threatened = [];
+                for (const p of (piecesState || [])) {
+                  if (p.color !== aiSide) continue;
+                  if (!highVals.includes(p.t)) continue;
+                  try {
+                    const attackers = attackersOfSquare(piecesState, p.x, p.y, p.z).filter(a => a.color !== aiSide).length;
+                    const defenders = attackersOfSquare(piecesState, p.x, p.y, p.z).filter(a => a.color === aiSide).length;
+                    if (attackers > defenders) threatened.push(p);
+                    else {
+                      try { const seeNow = staticExchangeEval(piecesState, p.x, p.y, p.z, opponent); if (typeof seeNow === 'number' && seeNow > 0) threatened.push(p); } catch (e) {}
+                    }
+                  } catch (e) {}
+                }
+                if (threatened.length > 0) {
+                  const defendersMoves = [];
+                  for (const m of orderedMoves) {
+                    try {
+                      const next = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                      let addresses = false;
+                      for (const tp of threatened) {
+                        try {
+                          // find the piece in the new position (it may have moved)
+                          const myPiece = next.find(pp => pp.id === tp.id) || null;
+                          const tx = myPiece ? myPiece.x : tp.x;
+                          const ty = myPiece ? myPiece.y : tp.y;
+                          const tz = myPiece ? myPiece.z : tp.z;
+                          const attackers = attackersOfSquare(next, tx, ty, tz).filter(a => a.color !== aiSide).length;
+                          const defenders = attackersOfSquare(next, tx, ty, tz).filter(a => a.color === aiSide).length;
+                          if (defenders >= attackers) { addresses = true; break; }
+                          // also allow moves that capture an attacker
+                          const attackedBy = attackersOfSquare(next, tx, ty, tz).filter(a => a.color !== aiSide);
+                          for (const at of attackedBy) {
+                            if (next.find(pp => pp.id === m.moverId && pp.x === at.x && pp.y === at.y && pp.z === at.z)) { addresses = true; break; }
+                          }
+                        } catch (e) {}
+                      }
+                      if (addresses) defendersMoves.push(m);
+                    } catch (e) {}
+                  }
+                  if (defendersMoves.length > 0) {
+                    try { console.debug('AI high-value safety filter applied', { threatenedCount: threatened.length, before: orderedMoves.length, after: defendersMoves.length }); } catch (e) {}
+                    orderedMoves = defendersMoves;
+                  }
+                }
+              } catch (e) { /* ignore safety filter failures */ }
+
+              // Diagnostic: log detailed info for pawn moves that are capturable next turn
+              try {
+                const opponent = aiSide === 'white' ? 'black' : 'white';
+                for (const m of orderedMoves) {
+                  try {
+                    const mover = (piecesState || []).find(p => p.id === m.moverId);
+                    if (!mover || mover.t !== 'p') continue;
+                    const next = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                    const oppMoves = getAllLegalMoves(next, opponent) || [];
+                    const captures = oppMoves.filter(oc => oc.x === m.x && oc.y === m.y && oc.z === m.z);
+                    if (captures.length === 0) continue;
+                    const capDetails = [];
+                    for (const oc of captures) {
+                      try {
+                        const see = staticExchangeEval(next, oc.x, oc.y, oc.z, opponent);
+                        const capPiece = next.find(pp => pp.x === oc.x && pp.y === oc.y && pp.z === oc.z && pp.color === aiSide) || null;
+                        capDetails.push({ by: oc.moverId, moverType: (next.find(pp=>pp.id===oc.moverId)||{}).t || '?', see, capPieceType: capPiece ? capPiece.t : null });
+                      } catch (e) { capDetails.push({ by: oc.moverId, moverType: (next.find(pp=>pp.id===oc.moverId)||{}).t || '?', see: 'ERR' }); }
+                    }
+                    const attackers = attackersOfSquare(next, m.x, m.y, m.z).filter(a => a.color !== aiSide).length;
+                    const defenders = attackersOfSquare(next, m.x, m.y, m.z).filter(a => a.color === aiSide).length;
+                    try { pushDebug('pawnDiagnostic', { moverId: mover.id, from: {x:mover.x,y:mover.y,z:mover.z}, to: {x:m.x,y:m.y,z:m.z}, captures: capDetails, attackers, defenders, moveHistoryLen: (moveHistory||[]).length }); } catch (e) {}
+                    try { console.log('pawnDiagnostic', { moverId: mover.id, from: {x:mover.x,y:mover.y,z:mover.z}, to: {x:m.x,y:m.y,z:m.z}, captures: capDetails, attackers, defenders }); } catch (e) {}
+                  } catch (e) {}
+                }
+              } catch (e) {}
+
+              // Pawn-safety filter: avoid pawn moves that immediately lose material
+              try {
+                const pawnSafe = [];
+                const opponent = aiSide === 'white' ? 'black' : 'white';
+                for (const m of orderedMoves) {
+                  try {
+                    const mover = (piecesState || []).find(p => p.id === m.moverId);
+                    if (!mover || mover.t !== 'p') { pawnSafe.push(m); continue; }
+                    const next = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                    const oppMoves = getAllLegalMoves(next, opponent) || [];
+                    let donation = false;
+                    for (const oc of oppMoves) {
+                      if (oc.x === m.x && oc.y === m.y && oc.z === m.z) {
+                        try {
+                          const see = staticExchangeEval(next, oc.x, oc.y, oc.z, opponent);
+                          const attackers = attackersOfSquare(next, m.x, m.y, m.z).filter(a => a.color !== aiSide).length;
+                          const defenders = attackersOfSquare(next, m.x, m.y, m.z).filter(a => a.color === aiSide).length;
+                          if ((typeof see === 'number' && see > 0) || attackers > defenders) { donation = true; break; }
+                        } catch (e) { /* ignore */ }
+                      }
+                    }
+                    if (!donation) pawnSafe.push(m);
+                  } catch (e) { pawnSafe.push(m); }
+                }
+                if (pawnSafe.length > 0 && pawnSafe.length < orderedMoves.length) {
+                  try { console.debug('AI pawn-safety filter applied', { before: orderedMoves.length, after: pawnSafe.length }); } catch (e) {}
+                  orderedMoves = pawnSafe;
+                }
+              } catch (e) { /* ignore pawn filter failures */ }
+
+              // quick immediate capture scan (all moves) but respect immediate-loss veto
+              try {
+                const vals = { p: 1, N: 3, B: 3, R: 5, Q: 9, K: 10000 };
+                const captureMoves = (moves || []).filter(m => (piecesState || []).some(pp => pp.x === m.x && pp.y === m.y && pp.z === m.z && pp.color !== aiSide));
+                if (captureMoves.length > 0) {
+                  let bestCap = null; let bestSee = -Infinity;
+                  for (const m of captureMoves) {
+                    try {
+                      const see = staticExchangeEval(piecesState, m.x, m.y, m.z, aiSide);
+                      // simulate and ensure this capture isn't immediately punished by opponent (veto)
+                      const nextTmp = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                      const opp = aiSide === 'white' ? 'black' : 'white';
+                      const oppMovesTmp = getAllLegalMoves(nextTmp, opp) || [];
+                      let maxOppSee = 0; let oppCanCapture = false;
+                      for (const oc of oppMovesTmp) {
+                        if (oc.x === m.x && oc.y === m.y && oc.z === m.z) {
+                          try { const s = staticExchangeEval(nextTmp, oc.x, oc.y, oc.z, opp); if (typeof s === 'number' && s > maxOppSee) maxOppSee = s; oppCanCapture = true; } catch (e) { oppCanCapture = true; maxOppSee = Math.max(maxOppSee, 0); }
+                        }
+                      }
+                      const attackers = attackersOfSquare(nextTmp, m.x, m.y, m.z).filter(a => a.color !== aiSide).length;
+                      const defenders = attackersOfSquare(nextTmp, m.x, m.y, m.z).filter(a => a.color === aiSide).length;
+                      const capturedPiece = (piecesState || []).find(pp => pp.x === m.x && pp.y === m.y && pp.z === m.z && pp.color !== aiSide) || null;
+                      const capturedVal = capturedPiece ? (vals[capturedPiece.t] || 0) : 0;
+                      // veto capture if opponent can immediately gain material and attackers outnumber defenders, unless we captured a strictly higher-value piece
+                      const veto = oppCanCapture && maxOppSee > 0 && attackers > defenders && !(capturedVal > maxOppSee);
+                      if (!veto) {
+                        if (typeof see === 'number' && see > bestSee) { bestSee = see; bestCap = m; }
+                      } else {
+                        try { console.debug('AI capture-scan vetoed unsafe capture', { move: m, maxOppSee, attackers, defenders, captured: capturedPiece && capturedPiece.t }); } catch (e) {}
+                      }
+                    } catch (e) {}
+                  }
+                  if (bestCap && (bestSee >= 1 || ((piecesState || []).find(pp=>pp.x===bestCap.x && pp.y===bestCap.y && pp.z===bestCap.z && pp.color!==aiSide) || {}).t === 'R' || ((piecesState || []).find(pp=>pp.x===bestCap.x && pp.y===bestCap.y && pp.z===bestCap.z && pp.color!==aiSide) || {}).t === 'Q')) {
+                    try { applyMove(bestCap.moverId, { x: bestCap.x, y: bestCap.y, z: bestCap.z }); } catch (e) {}
+                    return;
+                  }
+                }
+              } catch (e) {}
+
+              // Iterative deepening search with proper move ordering
+              console.log('AI: Starting iterative deepening search, maxDepth=', maxDepth, 'candidates=', orderedMoves.length);
+              for (let depth = 1; depth <= maxDepth; depth++) {
+                if (Date.now() > searchStateRef.current.endTime) {
+                  console.log('AI: Time cutoff at depth', depth);
+                  break;
+                }
+                
+                let localBest = null; 
+                let localBestScore = -Infinity;
+                const moveScores = new Map(); // track scores for move ordering next iteration
+                
+                console.log(`AI: Searching depth ${depth}/${maxDepth}, evaluating ${orderedMoves.length} moves`);
+                
+                for (const m of orderedMoves) {
+                  if (Date.now() > searchStateRef.current.endTime) break;
+                  
+                  try {
+                    const next = simulateMove(piecesState, m.moverId, { x: m.x, y: m.y, z: m.z });
+                    const opp = aiSide === 'white' ? 'black' : 'white';
+                    
+                    // Check for immediate checkmate
+                    const oppMoves = getAllLegalMoves(next, opp) || [];
+                    if (oppMoves.length === 0 && isAnyKingInCheck(next, opp)) {
+                      localBest = m; 
+                      localBestScore = 100000 - depth; // prefer shorter mates
+                      console.log('AI: Found checkmate!', m);
+                      break;
+                    }
+                    
+                    // Call negamax from opponent's perspective (negate result)
+                    const score = -negamax(next, opp, depth - 1, -Infinity, Infinity, 1);
+                    moveScores.set(m, score);
+                    
+                    if (score > localBestScore) {
+                      localBestScore = score;
+                      localBest = m;
+                    }
+                  } catch (e) {
+                    console.debug('AI: Error evaluating move', m, e);
+                  }
+                }
+                
+                // Update best move if we completed this depth
+                if (localBest && Date.now() <= searchStateRef.current.endTime) {
+                  best = localBest;
+                  bestScore = localBestScore;
+                  console.log(`AI: Depth ${depth} complete, best score=${localBestScore.toFixed(1)}, move=`, localBest);
+                  
+                  // Re-order moves for next iteration based on scores (best-first)
+                  orderedMoves.sort((a, b) => {
+                    const scoreA = moveScores.get(a) ?? -Infinity;
+                    const scoreB = moveScores.get(b) ?? -Infinity;
+                    return scoreB - scoreA; // descending
+                  });
+                }
+              }
+              
+              console.log('AI: Search complete, final best=', best, 'score=', bestScore);
+
+              // final safety: avoid moves where moved piece is immediately captured with positive SEE if alternatives exist
+              try {
+                if (best) {
+                  const next = simulateMove(piecesState, best.moverId, { x: best.x, y: best.y, z: best.z });
+                  const opponent = aiSide === 'white' ? 'black' : 'white';
+                  const oppMoves = getAllLegalMoves(next, opponent) || [];
+                  let immediateBad = false;
+                  for (const oc of oppMoves) {
+                    if (oc.x === best.x && oc.y === best.y && oc.z === best.z) {
+                      try {
+                        const seeVal = staticExchangeEval(next, oc.x, oc.y, oc.z, opponent);
+                        const attackers = attackersOfSquare(next, best.x, best.y, best.z).filter(a => a.color !== aiSide).length;
+                        const defenders = attackersOfSquare(next, best.x, best.y, best.z).filter(a => a.color === aiSide).length;
+                        // treat as immediate bad if SEE > 0 or attackers outnumber defenders (undefended)
+                        if ((typeof seeVal === 'number' && seeVal > 0) || (attackers > defenders)) { immediateBad = true; break; }
+                      } catch (e) {}
+                    }
+                  }
+                  if (immediateBad) {
+                    // try to find any ordered alternative that is not immediately badly captured
+                    for (const cand of orderedMoves) {
+                      if (cand === best) continue;
+                      try {
+                        const n2 = simulateMove(piecesState, cand.moverId, { x: cand.x, y: cand.y, z: cand.z });
+                        const opp2 = getAllLegalMoves(n2, opponent) || [];
+                        let bad2 = false;
+                        for (const oc of opp2) {
+                          if (oc.x === cand.x && oc.y === cand.y && oc.z === cand.z) {
+                            try {
+                              const s2 = staticExchangeEval(n2, oc.x, oc.y, oc.z, opponent);
+                              const attackers2 = attackersOfSquare(n2, cand.x, cand.y, cand.z).filter(a => a.color !== aiSide).length;
+                              const defenders2 = attackersOfSquare(n2, cand.x, cand.y, cand.z).filter(a => a.color === aiSide).length;
+                              if ((typeof s2 === 'number' && s2 > 0) || (attackers2 > defenders2)) { bad2 = true; break; }
+                            } catch (e) { bad2 = true; break; }
+                          }
+                        }
+                        if (!bad2) { try { console.debug('AI switched from immediate-bad best to safer candidate', { from: best, to: cand }); } catch (e) {} best = cand; break; }
+                      } catch (e) {}
+                    }
+                  }
+                }
+              } catch (e) {}
+
+                // apply final move
+              try {
+                if (!best) best = moves[Math.floor(Math.random() * moves.length)];
+                // Safety selection: prefer candidate with minimal opponent immediate capture SEE
+                try {
+                  const opponent = aiSide === 'white' ? 'black' : 'white';
+                  let candidates = orderedMoves.slice();
+                  if (!candidates || candidates.length === 0) candidates = [best];
+                  let safest = null; let safestSee = Infinity; let safestIsPawn = true;
+                  for (const cand of candidates) {
+                    try {
+                      const n = simulateMove(piecesState, cand.moverId, { x: cand.x, y: cand.y, z: cand.z });
+                      const oppMoves = getAllLegalMoves(n, opponent) || [];
+                      let maxSee = -Infinity;
+                      for (const oc of oppMoves) {
+                        if (oc.x === cand.x && oc.y === cand.y && oc.z === cand.z) {
+                          try { const s = staticExchangeEval(n, oc.x, oc.y, oc.z, opponent); if (typeof s === 'number' && s > maxSee) maxSee = s; } catch (e) { maxSee = Math.max(maxSee, 0); }
+                        }
+                      }
+                      if (maxSee < safestSee || (maxSee === safestSee && ((piecesState||[]).find(p=>p.id===cand.moverId)||{}).t !== 'p' && safestIsPawn)) {
+                        safest = cand; safestSee = (maxSee === -Infinity ? 0 : maxSee);
+                        safestIsPawn = (((piecesState||[]).find(p=>p.id===cand.moverId)||{}).t === 'p');
+                      }
+                    } catch (e) {}
+                  }
+                  if (safest) {
+                    try { console.debug('AI safety selection chose', { from: best, to: safest, safestSee }); } catch (e) {}
+                    best = safest;
+                  }
+                } catch (e) {}
+                // Detailed debug: log why this final move is chosen, especially for pawns
+                try {
+                  const moverPiece = (piecesState || []).find(p => p.id === best.moverId) || null;
+                  const opponent = aiSide === 'white' ? 'black' : 'white';
+                  const next = simulateMove(piecesState, best.moverId, { x: best.x, y: best.y, z: best.z });
+                  const oppMoves = getAllLegalMoves(next, opponent) || [];
+                  const captures = oppMoves.filter(oc => oc.x === best.x && oc.y === best.y && oc.z === best.z).map(oc => {
+                    try { return { moverId: oc.moverId, type: (next.find(pp=>pp.id===oc.moverId)||{}).t || '?', see: staticExchangeEval(next, oc.x, oc.y, oc.z, opponent) }; } catch (e) { return { moverId: oc.moverId, type: (next.find(pp=>pp.id===oc.moverId)||{}).t || '?', see: 'ERR' }; }
+                  });
+                  const attackers = attackersOfSquare(next, best.x, best.y, best.z).filter(a => a.color !== aiSide).length;
+                  const defenders = attackersOfSquare(next, best.x, best.y, best.z).filter(a => a.color === aiSide).length;
+                  try { pushDebug('finalMoveDecision', { best, moverPieceType: moverPiece ? moverPiece.t : null, captures, attackers, defenders, moveHistoryLen: (moveHistory||[]).length }); } catch (e) {}
+                  try { console.log('finalMoveDecision', { best, moverPieceType: moverPiece ? moverPiece.t : null, captures, attackers, defenders }); } catch (e) {}
+                } catch (e) {}
+                // Extra king-safety veto: avoid moving king into as-many-or-more attacked square
+                try {
+                  const moverPieceFinal = (piecesState || []).find(p => p.id === best.moverId) || null;
+                  if (moverPieceFinal && moverPieceFinal.t === 'K') {
+                    try {
+                      const kingBefore = moverPieceFinal;
+                      const attackersBefore = attackersOfSquare(piecesState, kingBefore.x, kingBefore.y, kingBefore.z).filter(a => a.color !== aiSide).length;
+                      const nextBest = simulateMove(piecesState, best.moverId, { x: best.x, y: best.y, z: best.z });
+                      const attackersAfter = attackersOfSquare(nextBest, best.x, best.y, best.z).filter(a => a.color !== aiSide).length;
+                      if (attackersAfter > 0 && attackersAfter >= attackersBefore) {
+                        // try to find a non-king alternative that improves king safety
+                        let alternative = null;
+                        for (const cand of orderedMoves) {
+                          try {
+                            const moverCand = (piecesState || []).find(p => p.id === cand.moverId) || null;
+                            if (moverCand && moverCand.t === 'K') continue;
+                            const nCand = simulateMove(piecesState, cand.moverId, { x: cand.x, y: cand.y, z: cand.z });
+                            const attackersCand = attackersOfSquare(nCand, cand.x, cand.y, cand.z).filter(a => a.color !== aiSide).length;
+                            if (attackersCand < attackersBefore) { alternative = cand; break; }
+                          } catch (e) { /* ignore candidate errors */ }
+                        }
+                        if (alternative) {
+                          try { console.debug('AI avoided unsafe king move, switching to alternative', { from: best, to: alternative, attackersBefore, attackersAfter }); } catch (e) {}
+                          best = alternative;
+                        } else {
+                          try { console.debug('AI allowed king move despite safety check', { best, attackersBefore, attackersAfter }); } catch (e) {}
+                        }
+                      }
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+                // Preserve castling rights: avoid early non-castling king moves when castling is available
+                try {
+                  const moverPieceFinal = (piecesState || []).find(p => p.id === best.moverId) || null;
+                  if (moverPieceFinal && moverPieceFinal.t === 'K' && !(best && best.castle)) {
+                    try {
+                      const plyCount = (moveHistory || []).length || 0;
+                        // consider castling rights possible if king and at least one rook haven't moved (even if castling isn't legal right now)
+                        const kingPiece = (piecesState || []).find(p => p.color === aiSide && p.t === 'K');
+                        const rookExists = (piecesState || []).some(p => p.color === aiSide && p.t === 'R' && !p.hasMoved);
+                        const castleAvailable = kingPiece && !kingPiece.hasMoved && rookExists;
+                      // if castling is available and early in the game, prefer non-king moves
+                      if (castleAvailable && plyCount < 12) {
+                        let alternative = null;
+                        for (const cand of orderedMoves) {
+                          try {
+                            const moverCand = (piecesState || []).find(p => p.id === cand.moverId) || null;
+                            if (!moverCand) continue;
+                            if (moverCand.t === 'K') continue;
+                            // prefer move that doesn't worsen king safety
+                            const nCand = simulateMove(piecesState, cand.moverId, { x: cand.x, y: cand.y, z: cand.z });
+                            const kingPos = moverPieceFinal;
+                            const attackersBefore = attackersOfSquare(piecesState, kingPos.x, kingPos.y, kingPos.z).filter(a => a.color !== aiSide).length;
+                            const attackersAfter = attackersOfSquare(nCand, kingPos.x, kingPos.y, kingPos.z).filter(a => a.color !== aiSide).length;
+                            if (attackersAfter <= attackersBefore) { alternative = cand; break; }
+                          } catch (e) { /* ignore candidate errors */ }
+                        }
+                        if (alternative) {
+                          try { console.debug('AI avoided early king move to preserve castling, switching to alternative', { from: best, to: alternative }); } catch (e) {}
+                          best = alternative;
+                        } else {
+                          try { console.debug('No suitable alternative found to preserve castling; allowing king move', { best }); } catch (e) {}
+                        }
+                      }
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+                applyMove(best.moverId, { x: best.x, y: best.y, z: best.z });
+                try { console.debug('AI applied move', best); } catch (e) {}
+              } catch (e) { try { console.debug('AI applyMove failed', e); } catch (ee) {} }
+
+            } catch (e) { try { console.debug('AI move failed', e); } catch (ee) {} }
+          })();
+        }, thinkDelay);
+        return () => clearTimeout(t);
+      }, [currentTurn, aiSide, piecesState, gameOver, getAllLegalMoves, simulateMove, negamax, applyMove, generateMoveNotation, orderMoves, isAnyKingInCheck, staticExchangeEval, attackersOfSquare]);
+
       // keep OrbitControls enabled state in sync with pointer interaction/dragging
       useEffect(() => {
         try {
@@ -1668,6 +3976,44 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         } catch (e) {}
       }, [pointerActive, isDragging, controlsRef]);
 
+      // handle browser resize: update camera aspect and controls so canvas reflows correctly
+      useEffect(() => {
+        const onResize = () => {
+          try {
+            const canvas = document.querySelector('canvas');
+            if (!canvas) return;
+            const rect = canvas.getBoundingClientRect();
+            // update camera aspect if available
+            try {
+              const cam = controlsRef && controlsRef.current && controlsRef.current.object;
+              if (cam && typeof cam.aspect === 'number') {
+                const w = Math.max(1, rect.width);
+                const h = Math.max(1, rect.height);
+                cam.aspect = w / h;
+                if (typeof cam.updateProjectionMatrix === 'function') cam.updateProjectionMatrix();
+                // reapply saved camera position/target to avoid visual shift
+                try {
+                  if (Array.isArray(camPos) && camPos.length === 3) {
+                    cam.position.set(camPos[0], camPos[1], camPos[2]);
+                  }
+                  const c = controlsRef && controlsRef.current;
+                  if (c && c.target && Array.isArray(camTarget) && camTarget.length === 3) {
+                    c.target.set(camTarget[0], camTarget[1], camTarget[2]);
+                  }
+                } catch (e) {}
+              }
+            } catch (e) {}
+            // force controls update and dispatch a single resize event
+            try { if (controlsRef && controlsRef.current && typeof controlsRef.current.update === 'function') controlsRef.current.update(); } catch (e) {}
+            try { window.dispatchEvent(new Event('chess3d:resize')); } catch (e) {}
+          } catch (e) {}
+        };
+        window.addEventListener('resize', onResize);
+        // call once shortly after mount to settle layout
+        setTimeout(onResize, 100);
+        return () => window.removeEventListener('resize', onResize);
+      }, [controlsRef, camPos, camTarget]);
+
 
 
       return (
@@ -1676,21 +4022,42 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 <aside className="sidebar">
             <h2 className="title">Quadlevel 3D Chess</h2>
             <div className="menu">
-              <button className="menu-button" onClick={() => setAiSide('white')}>
-                Play AI White
-              </button>
-              <button className="menu-button" onClick={() => setAiSide('black')}>
-                Play AI Black
-              </button>
+              {!gameStarted ? (
+                <>
+                  <button className="menu-button" onClick={() => { resetGame(); setAiSide(null); setGameStarted(true); }}>
+                    Play 2-Player
+                  </button>
+                  <button className="menu-button" onClick={() => { resetGame(); setAiSide('white'); setGameStarted(true); }}>
+                    Play AI White
+                  </button>
+                  <button className="menu-button" onClick={() => { resetGame(); setAiSide('black'); setGameStarted(true); }}>
+                    Play AI Black
+                  </button>
+                </>
+              ) : (
+                <>
+                <button className="menu-button" onClick={() => { resetGame(); setAiSide(null); setGameStarted(false); }}>
+                  Start a new game
+                </button>
+              <hr />
+              <button className="menu-button" onClick={exportGame}>Export</button>
+              <input ref={importInputRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => { if (e.target.files && e.target.files[0]) importGame(e.target.files[0]); e.target.value = null; }} />
+              <button className="menu-button" style={{ marginTop: 6 }} onClick={() => importInputRef.current && importInputRef.current.click()}>Import</button>
+              <button className="menu-button" style={{ marginTop: 6 }} onClick={takeBack} disabled={!(statesHistoryRef && statesHistoryRef.current && statesHistoryRef.current.length > 0)}>Take Back</button>
+              </>
+              )
+            }
             </div>
             <div className="status">AI playing: {aiSide || 'none'}</div>
             <div className="status">Game Over: {gameOver ? `yes — ${gameWinner || 'unknown'}` : 'no'}</div>
             <div className="status">Last double-step: {lastMove ? `to [${lastMove.to.x},${lastMove.to.y},${lastMove.to.z}] id:${lastMove.id}` : 'none'}</div>
             <div className="status">Status: {statusMessage || 'none'}</div>
-            {/* CHECK indicator: display prominent label when a side is in check */}
-            {statusMessage && statusMessage.toLowerCase().includes('check') ? (
+            {/* CHECK / CHECKMATE indicator */}
+            {gameOver && statusMessage && statusMessage.toLowerCase().includes('checkmate') ? (
+              <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECKMATE — Winner: {gameWinner ? (gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)) : 'Unknown'}</div>
+            ) : (statusMessage && statusMessage.toLowerCase().includes('check') ? (
               <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECK</div>
-            ) : null}
+            ) : null)}
 
             <div style={{ marginTop: '10px' }}>
               <div style={{ fontWeight: 'bold', marginBottom: '6px' }}>Moves</div>
@@ -1713,6 +4080,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           </aside>
           <main className="main">
             <Canvas
+              key={canvasKey}
               className="canvas"
               camera={{ position: camPos, fov: 32 }}
               onPointerMove={(e) => {
@@ -1856,10 +4224,13 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 try { if (controlsRef.current) controlsRef.current.enabled = true; } catch {}
               }}
             >
+              {/* Diagnostic: log Canvas mount/unmount via a proper component */}
+              <CanvasLogger canvasKey={canvasKey} />
               <ambientLight intensity={0.6} />
+              <R3FResize />
               <directionalLight position={[5, 12, 5]} intensity={0.9} />
               <group ref={groupRef} scale={sceneScale}>
-                <QuadLevelBoard />
+                <QuadLevelBoard flipBoard={(currentTurn === 'black') && !aiSide} />
                 <Pieces
                   piecesState={piecesState}
                   setPiecesState={setPiecesState}
@@ -1884,7 +4255,6 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                    rookGltf={rookGltf}
                    queenGltf={queenGltf}
                    clones={clones}
-                  currentTurn={currentTurn}
                   pointerDownPieceRef={pointerDownPieceRef}
                   pointerStartScreenRef={pointerStartScreenRef}
                   pointerLastScreenRef={pointerLastScreenRef}
@@ -1901,6 +4271,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     setMoveHistory={setMoveHistory}
                     moveHistory={moveHistory}
                     gameOver={gameOver}
+                    generateMoveNotation={generateMoveNotation}
+                    moveLockRef={moveLockRef}
+                    aiSide={aiSide}
+                    pushStateSnapshot={pushStateSnapshot}
                 />
                 <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} currentTurn={currentTurn} />
                 
