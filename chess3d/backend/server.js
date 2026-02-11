@@ -27,20 +27,27 @@ let db, pgPool;
 
 if (usePostgres) {
   console.log('Using PostgreSQL database');
-  pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-  });
-  
-  // Create table in PostgreSQL
-  await pgPool.query(`CREATE TABLE IF NOT EXISTS games (
-    id TEXT PRIMARY KEY,
-    state TEXT,
-    status TEXT,
-    ownerToken TEXT,
-    createdAt TEXT,
-    updatedAt TEXT
-  )`);
+  console.log('DATABASE_URL present:', !!process.env.DATABASE_URL);
+  try {
+    pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    });
+    
+    // Create table in PostgreSQL
+    await pgPool.query(`CREATE TABLE IF NOT EXISTS games (
+      id TEXT PRIMARY KEY,
+      state TEXT,
+      status TEXT,
+      ownerToken TEXT,
+      createdAt TEXT,
+      updatedAt TEXT
+    )`);
+    console.log('PostgreSQL connected and table created');
+  } catch (err) {
+    console.error('PostgreSQL connection error:', err);
+    throw err;
+  }
 } else {
   console.log('Using SQLite database (local dev)');
   const DB_PATH = path.join(process.cwd(), 'games.db');
@@ -55,6 +62,7 @@ if (usePostgres) {
     createdAt TEXT,
     updatedAt TEXT
   )`).run();
+  console.log('SQLite database initialized');
 }
 
 // Root route

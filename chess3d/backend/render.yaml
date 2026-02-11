@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: chess3d-backend
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chess3d-db
+          property: connectionString
+
+databases:
+  - name: chess3d-db
+    databaseName: chess3d
+    user: chess3d
+    plan: free

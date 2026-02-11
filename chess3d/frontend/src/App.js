@@ -2940,14 +2940,21 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             return;
           }
           const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
-          if (!resp.ok) throw new Error('save failed');
+          if (!resp.ok) {
+            const errorText = await resp.text();
+            console.error('Server save failed:', resp.status, errorText);
+            throw new Error('save failed');
+          }
           const j = await resp.json();
           if (j.id && j.ownerToken) {
             localStorage.setItem(SERVER_ID_KEY, j.id);
             localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
             console.log(`Saved to server. ID: ${j.id}`);
           }
-        } catch (e) { alert('Server save failed'); }
+        } catch (e) { 
+          console.error('Server save error:', e.message, e);
+          alert(`Server save failed: ${e.message}`); 
+        }
       };
 
       // immediate save helper that accepts an explicit state object to avoid races
