@@ -430,7 +430,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       );
     }
 
-    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot }) {
+    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped }) {
       const levels = LEVEL_Y;
       const pieces = [];
 
@@ -445,8 +445,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       // helper to convert logical coords to world positions
       function worldPosFromLogical(lx, ly, lz) {
         // When it's Black's turn we mirror the X axis so the board appears reversed
-        // do not auto-flip board view when an AI player is running
-        const effectiveLX = (aiSide ? lx : ((currentTurn === 'black') ? (7 - lx) : lx));
+        // flip for 2-player when black's turn, or when playing as black (boardFlipped)
+        const shouldFlip = boardFlipped || ((currentTurn === 'black') && !aiSide);
+        const effectiveLX = shouldFlip ? (7 - lx) : lx;
         const wx = effectiveLX - 3.5;
         const wy = levels[lz] + 0.11;
         const wz = (3 - ly) - 3.5;
@@ -1428,6 +1429,31 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [dragPointWorld, setDragPointWorld] = useState(null);
       const [castlePrompt, setCastlePrompt] = useState(null);
       
+      // Mobile-friendly states
+      const [showAllMoves, setShowAllMoves] = useState(false);
+      const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+      
+      // Board flip state (when playing as black)
+      const [boardFlipped, setBoardFlipped] = useState(false);
+      
+      // Sync boardFlipped with aiSide (flip when playing as black against AI white)
+      useEffect(() => {
+        if (aiSide === 'white') {
+          setBoardFlipped(true);
+        } else if (aiSide === 'black' || aiSide === null) {
+          setBoardFlipped(false);
+        }
+      }, [aiSide]);
+      
+      // Detect mobile viewport
+      useEffect(() => {
+        const handleResize = () => {
+          setIsMobile(window.innerWidth <= 768);
+        };
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+      }, []);
+      
       const [pendingDrop, setPendingDrop] = useState(null);
       const [pointerActive, setPointerActive] = useState(false);
       const pointerDownRef = useRef(false);
@@ -1531,6 +1557,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           setGameOver(false);
           setGameWinner(null);
           setStatusMessage('');
+          setBoardFlipped(false);
         } catch (e) { console.debug('resetGame error', e); }
       };
       const prevPiecesRef = useRef(piecesState);
@@ -3096,6 +3123,56 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         const t = setTimeout(() => {
           (async () => {
             try {
+              // Random opening move for AI White
+              if (aiSide === 'white' && moveHistory.length === 0) {
+                const openingMoves = ['2c4', '2b4', '3c4', '3b4'];
+                const selectedOpening = openingMoves[Math.floor(Math.random() * openingMoves.length)];
+                console.log(`AI White: Selected random opening move: ${selectedOpening}`);
+                
+                // Parse notation: format is "ZYX" where Z=level(1-4), Y=file(a-d), X=rank(1-8)
+                // Example: "2c5" means level 2, file c, rank 5
+                const parseNotation = (s) => {
+                  const m = s.match(/^([1-4])([a-d])([1-8])$/);
+                  if (!m) return null;
+                  const z = Number(m[1]) - 1;  // level 0-3
+                  const y = m[2].charCodeAt(0) - 'a'.charCodeAt(0);  // file 0-3 (a=0, b=1, c=2, d=3)
+                  const x = 8 - Number(m[3]);  // rank to x: rank 8→x=0, rank 1→x=7
+                  return { x, y, z };
+                };
+                
+                const targetSquare = parseNotation(selectedOpening);
+                console.log(`AI White: Parsed target square:`, targetSquare);
+                
+                if (targetSquare) {
+                  // Find the pawn that can move to this square
+                  // White pawns start at x=6 (rank 2)
+                  const pawn = (piecesState || []).find(p => 
+                    p.color === 'white' && 
+                    p.t === 'p' && 
+                    p.y === targetSquare.y && 
+                    p.z === targetSquare.z &&
+                    p.x === 6
+                  );
+                  
+                  console.log(`AI White: Found pawn:`, pawn);
+                  
+                  if (pawn) {
+                    try {
+                      applyMove(pawn.id, { x: targetSquare.x, y: targetSquare.y, z: targetSquare.z });
+                      console.log(`AI White: Successfully applied opening move ${selectedOpening}`);
+                      return;
+                    } catch (e) {
+                      console.error('AI White: Failed to apply opening move', e);
+                    }
+                  } else {
+                    console.warn('AI White: Could not find pawn for opening move', selectedOpening, 'at position', targetSquare);
+                    // List all white pawns for debugging
+                    const allWhitePawns = (piecesState || []).filter(p => p.color === 'white' && p.t === 'p');
+                    console.log('AI White: All white pawns:', allWhitePawns);
+                  }
+                }
+              }
+              
               let moves = getAllLegalMoves(piecesState, aiSide || 'black');
               
               // CRITICAL: Hard filter to completely block early queen moves in opening
@@ -4028,7 +4105,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   <button className="menu-button" onClick={() => { resetGame(); setAiSide(null); setGameStarted(true); }}>
                     Play 2-Player
                   </button>
-                  <button className="menu-button" onClick={() => { resetGame(); setAiSide('white'); setGameStarted(true); }}>
+                  <button className="menu-button" onClick={() => { resetGame(); setAiSide('white'); setBoardFlipped(true); setGameStarted(true); }}>
                     Play AI White
                   </button>
                   <button className="menu-button" onClick={() => { resetGame(); setAiSide('black'); setGameStarted(true); }}>
@@ -4049,10 +4126,14 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               )
             }
             </div>
-            <div className="status">AI playing: {aiSide || 'none'}</div>
-            <div className="status">Game Over: {gameOver ? `yes — ${gameWinner || 'unknown'}` : 'no'}</div>
-            <div className="status">Last double-step: {lastMove ? `to [${lastMove.to.x},${lastMove.to.y},${lastMove.to.z}] id:${lastMove.id}` : 'none'}</div>
-            <div className="status">Status: {statusMessage || 'none'}</div>
+            {!isMobile && (
+              <>
+                <div className="status">AI playing: {aiSide || 'none'}</div>
+                <div className="status">Game Over: {gameOver ? `yes — ${gameWinner || 'unknown'}` : 'no'}</div>
+                <div className="status">Last double-step: {lastMove ? `to [${lastMove.to.x},${lastMove.to.y},${lastMove.to.z}] id:${lastMove.id}` : 'none'}</div>
+                <div className="status">Status: {statusMessage || 'none'}</div>
+              </>
+            )}
             {/* CHECK / CHECKMATE indicator */}
             {gameOver && statusMessage && statusMessage.toLowerCase().includes('checkmate') ? (
               <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECKMATE — Winner: {gameWinner ? (gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)) : 'Unknown'}</div>
@@ -4060,21 +4141,35 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECK</div>
             ) : null)}
 
-            <div style={{ marginTop: '10px' }}>
+            <div style={{ marginTop: '10px', width: isMobile ? '100%' : 'auto' }}>
               <div style={{ fontWeight: 'bold', marginBottom: '6px' }}>Moves</div>
               <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
                 {moveHistory.length === 0 ? <div style={{ color: '#888' }}>no moves</div> : (
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <tbody>
-                      {moveHistory.map((mv, idx) => (
-                        <tr key={`mh-${idx}`}>
-                          <td style={{ width: '40px', paddingRight: '6px' }}>{idx + 1}:</td>
-                          <td style={{ width: '50%', paddingRight: '6px' }}>{mv.white || ''}</td>
-                          <td style={{ width: '50%' }}>{mv.black || ''}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <tbody>
+                        {(isMobile && !showAllMoves ? moveHistory.slice(-3) : moveHistory).map((mv, idx) => {
+                          const actualIdx = isMobile && !showAllMoves ? moveHistory.length - 3 + idx : idx;
+                          if (actualIdx < 0) return null;
+                          return (
+                            <tr key={`mh-${actualIdx}`}>
+                              <td style={{ width: '40px', paddingRight: '6px' }}>{actualIdx + 1}:</td>
+                              <td style={{ width: '50%', paddingRight: '6px' }}>{moveHistory[actualIdx].white || ''}</td>
+                              <td style={{ width: '50%' }}>{moveHistory[actualIdx].black || ''}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    {isMobile && moveHistory.length > 3 && (
+                      <button 
+                        className="show-all-moves" 
+                        onClick={() => setShowAllMoves(!showAllMoves)}
+                      >
+                        {showAllMoves ? 'Show Recent' : `Show All (${moveHistory.length})`}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -4231,7 +4326,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               <R3FResize />
               <directionalLight position={[5, 12, 5]} intensity={0.9} />
               <group ref={groupRef} scale={sceneScale}>
-                <QuadLevelBoard flipBoard={(currentTurn === 'black') && !aiSide} />
+                <QuadLevelBoard flipBoard={boardFlipped || ((currentTurn === 'black') && !aiSide)} />
                 <Pieces
                   piecesState={piecesState}
                   setPiecesState={setPiecesState}
@@ -4276,6 +4371,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     moveLockRef={moveLockRef}
                     aiSide={aiSide}
                     pushStateSnapshot={pushStateSnapshot}
+                    boardFlipped={boardFlipped}
                 />
                 <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} currentTurn={currentTurn} />
                 
