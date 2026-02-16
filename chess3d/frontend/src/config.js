@@ -1,12 +1,11 @@
 // Backend API Configuration
 // For local development: use empty string (relative URLs)
-// For production on GoDaddy: use your Render backend URL
+// For production on GoDaddy: use your actual domain
 
-// Local development (backend running on localhost:3001)
-// export const API_BASE_URL = '';
+// Local development (ASP.NET backend running on localhost:5000)
+// export const API_BASE_URL = 'http://localhost:5000';
 
-// Production (backend on Render)
-export const API_BASE_URL = process.env.REACT_APP_API_URL || '';
+// Production (backend on GoDaddy) - UPDATE WITH YOUR ACTUAL DOMAIN
+export const API_BASE_URL = 'https://chess3d.com/chess3dapi2';
 
-// After deploying backend to Render, update .env file with:
-// REACT_APP_API_URL=https://your-service-name.onrender.com
+// Replace YOUR_DOMAIN_HERE.com with your actual GoDaddy domain

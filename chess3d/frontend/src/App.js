@@ -430,7 +430,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       );
     }
 
-    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped }) {
+    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped }) {
       const levels = LEVEL_Y;
       const pieces = [];
 
@@ -1148,7 +1148,14 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               withoutCaptured = prev.filter(pp => !(pp.x === finalTarget.x && pp.y === finalTarget.y && pp.z === finalTarget.z && pp.color !== movingColor));
             }
             const next = withoutCaptured.map((pp) => {
-              if (pp.id === selectedPieceId) return { ...pp, x: finalTarget.x, y: finalTarget.y, z: finalTarget.z, hasMoved: true };
+              if (pp.id === selectedPieceId) {
+                const updated = { ...pp, x: finalTarget.x, y: finalTarget.y, z: finalTarget.z, hasMoved: true };
+                // Apply pawn promotion if specified
+                if (finalTarget.promotion && pp.t === 'p') {
+                  updated.t = finalTarget.promotion;
+                }
+                return updated;
+              }
               // handle castling rook movement — compute safe rookTo so it never lands onto the king's landing square
               if (finalTarget && finalTarget.castle && pp.id === finalTarget.castle.rookId) {
                 const originalRookTo = finalTarget.castle.rookTo;
@@ -1225,6 +1232,28 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const moveTo = useCallback((target) => {
         if (selectedPieceId == null) return;
         if (moveLockRef.current) return;
+        
+        // Check for pawn promotion
+        try {
+          const mover = piecesState.find(pp => pp.id === selectedPieceId);
+          if (mover && mover.t === 'p') {
+            // White pawns promote at x=7, black pawns at x=0
+            const promotionRank = mover.color === 'white' ? 7 : 0;
+            if (target.x === promotionRank) {
+              // Show promotion dialog
+              if (typeof showPromotionPrompt === 'function') {
+                showPromotionPrompt({
+                  onSelect: (pieceType) => _doMove({ ...target, promotion: pieceType })
+                });
+                return;
+              }
+              // Fallback: default to queen
+              _doMove({ ...target, promotion: 'Q' });
+              return;
+            }
+          }
+        } catch (e) {}
+        
         try {
           if (target && target.castle && target.castle.type === 'king') {
             if (typeof showCastlePrompt === 'function') {
@@ -1236,7 +1265,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           }
         } catch (e) {}
         _doMove(target);
-      }, [selectedPieceId, moveLockRef, showCastlePrompt, _doMove]);
+      }, [selectedPieceId, moveLockRef, showCastlePrompt, showPromotionPrompt, _doMove, piecesState]);
 
       // when App reports a pendingDrop, decide whether it's a legal landing square
       useEffect(() => {
@@ -1428,6 +1457,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [dragHeight, setDragHeight] = useState(0);
       const [dragPointWorld, setDragPointWorld] = useState(null);
       const [castlePrompt, setCastlePrompt] = useState(null);
+      const [promotionPrompt, setPromotionPrompt] = useState(null);
       
       // Mobile-friendly states
       const [showAllMoves, setShowAllMoves] = useState(false);
@@ -1492,6 +1522,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const showCastlePrompt = (opts) => {
         // opts: { title, onYes, onNo }
         setCastlePrompt(opts);
+      };
+
+      const showPromotionPrompt = (opts) => {
+        // opts: { onSelect: (pieceType) => void }
+        setPromotionPrompt(opts);
       };
       
 
@@ -2935,9 +2970,20 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           if (existingId) {
             // update
             const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state, ownerToken }) });
-            if (!resp.ok) throw new Error('update failed');
-            console.log('Saved to server (updated)');
-            return;
+            if (!resp.ok) {
+              if (resp.status === 404) {
+                // Game not found, clear localStorage and create new
+                console.log('Game not found, creating new game');
+                localStorage.removeItem(SERVER_ID_KEY);
+                localStorage.removeItem(SERVER_TOKEN_KEY);
+                // Fall through to create new game
+              } else {
+                throw new Error('update failed');
+              }
+            } else {
+              console.log('Saved to server (updated)');
+              return;
+            }
           }
           const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
           if (!resp.ok) {
@@ -2966,9 +3012,20 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
           if (existingId) {
             const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState, ownerToken }) });
-            if (!resp.ok) throw new Error('update failed');
-            console.log('Saved to server (updated)');
-            return;
+            if (!resp.ok) {
+              if (resp.status === 404) {
+                // Game not found, clear localStorage and create new
+                console.log('Game not found, creating new game');
+                localStorage.removeItem(SERVER_ID_KEY);
+                localStorage.removeItem(SERVER_TOKEN_KEY);
+                // Fall through to create new game
+              } else {
+                throw new Error('update failed');
+              }
+            } else {
+              console.log('Saved to server (updated)');
+              return;
+            }
           }
           const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState }) });
           if (!resp.ok) throw new Error('save failed');
@@ -2993,10 +3050,22 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const id = idPrompt || prompt('Enter game id to load:');
           if (!id) return;
           const resp = await fetch(`${API_BASE_URL}/api/games/${id}`);
-          if (!resp.ok) { alert('Load failed'); return; }
+          if (!resp.ok) { 
+            console.log(`Load failed: ${resp.status} ${resp.statusText}`);
+            if (resp.status === 404) {
+              // Game not found - clear localStorage
+              localStorage.removeItem(SERVER_ID_KEY);
+              localStorage.removeItem(SERVER_TOKEN_KEY);
+              console.log('Game not found, cleared localStorage');
+              return;
+            }
+            alert(`Load failed: ${resp.status}`); 
+            return; 
+          }
           const j = await resp.json();
-          if (j && j.state) {
-            const s = j.state;
+          if (j && (j.state || j.stateJson)) {
+            // Parse stateJson if present (new API), otherwise use state (legacy)
+            const s = j.stateJson ? JSON.parse(j.stateJson) : j.state;
             setPiecesState(s.piecesState || []);
             setMoveHistory(s.moveHistory || []);
             setCurrentTurn(s.currentTurn || 'white');
@@ -4351,6 +4420,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   pointerStartRef={pointerStartRef}
                   pointerDepthRef={pointerDepthRef}
                   showCastlePrompt={showCastlePrompt}
+                  showPromotionPrompt={showPromotionPrompt}
                    kingGltf={kingGltf}
                    pawnGltf={pawnGltf}
                    knightGltf={knightGltf}
@@ -4422,6 +4492,22 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
                 <button onClick={() => { try { castlePrompt.onYes && castlePrompt.onYes(); } catch (e) {} setCastlePrompt(null); }} style={{ padding: '6px 12px' }}>Yes</button>
                 <button onClick={() => { try { castlePrompt.onNo && castlePrompt.onNo(); } catch (e) {} setCastlePrompt(null); }} style={{ padding: '6px 12px' }}>No</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        
+        {promotionPrompt ? (
+          <div style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto', zIndex: 10000 }}>
+            <div style={{ background: 'rgba(0,0,0,0.6)', position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+            <div style={{ zIndex: 10001, background: '#fff', padding: 20, borderRadius: 8, minWidth: 260, boxShadow: '0 10px 30px rgba(0,0,0,0.4)', textAlign: 'center' }}>
+              <div style={{ fontWeight: 'bold', marginBottom: 8 }}>Promote Pawn</div>
+              <div style={{ marginBottom: 12, color: '#333' }}>Choose a piece:</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button onClick={() => { try { promotionPrompt.onSelect && promotionPrompt.onSelect('Q'); } catch (e) {} setPromotionPrompt(null); }} style={{ padding: '8px 12px', fontSize: '14px' }}>Queen</button>
+                <button onClick={() => { try { promotionPrompt.onSelect && promotionPrompt.onSelect('N'); } catch (e) {} setPromotionPrompt(null); }} style={{ padding: '8px 12px', fontSize: '14px' }}>Knight</button>
+                <button onClick={() => { try { promotionPrompt.onSelect && promotionPrompt.onSelect('R'); } catch (e) {} setPromotionPrompt(null); }} style={{ padding: '8px 12px', fontSize: '14px' }}>Rook</button>
+                <button onClick={() => { try { promotionPrompt.onSelect && promotionPrompt.onSelect('B'); } catch (e) {} setPromotionPrompt(null); }} style={{ padding: '8px 12px', fontSize: '14px' }}>Bishop</button>
               </div>
             </div>
           </div>
