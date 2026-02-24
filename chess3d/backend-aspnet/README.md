@@ -57,7 +57,7 @@ Edit `appsettings.Production.json`:
 ```json
 {
   "ConnectionStrings": {
-    "DefaultConnection": "Server=YOUR_GODADDY_MYSQL_HOST;Database=chess3d;User=YOUR_MYSQL_USERNAME;Password=Kangbote1984$$;"
+    "DefaultConnection": "Server=YOUR_GODADDY_MYSQL_HOST;Database=chess3d;User=YOUR_MYSQL_USERNAME;Password=YOUR_MYSQL_PASSWORD;"
   }
 }
 ```
