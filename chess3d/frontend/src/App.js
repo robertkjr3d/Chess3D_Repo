@@ -6,6 +6,99 @@ import { OrbitControls, useGLTF } from "@react-three/drei";
 import "./App.css";
 import { API_BASE_URL } from './config';
 
+// ── FEN computation for Stockfish sync ──────────────────────────────────────
+// Castle entries matching C++ CastleEntry tables (WhiteCastles[0..7], BlackCastles[0..7])
+// Positions are in frontend coords: x=row (0=rank8, 7=rank1), y=file, z=level
+const CASTLE_ENTRIES = [
+  // White entries (bits 0–7)
+  { color: 'white', king: {x:7,y:2,z:2}, rook: {x:7,y:3,z:3} },
+  { color: 'white', king: {x:7,y:2,z:2}, rook: {x:7,y:3,z:3} },
+  { color: 'white', king: {x:7,y:1,z:1}, rook: {x:7,y:0,z:0} },
+  { color: 'white', king: {x:7,y:1,z:1}, rook: {x:7,y:0,z:0} },
+  { color: 'white', king: {x:7,y:1,z:1}, rook: {x:7,y:3,z:0} },
+  { color: 'white', king: {x:7,y:1,z:1}, rook: {x:7,y:0,z:3} },
+  { color: 'white', king: {x:7,y:2,z:2}, rook: {x:7,y:0,z:3} },
+  { color: 'white', king: {x:7,y:2,z:2}, rook: {x:7,y:3,z:0} },
+  // Black entries (bits 8–15)
+  { color: 'black', king: {x:0,y:2,z:2}, rook: {x:0,y:3,z:3} },
+  { color: 'black', king: {x:0,y:2,z:2}, rook: {x:0,y:3,z:3} },
+  { color: 'black', king: {x:0,y:1,z:1}, rook: {x:0,y:0,z:0} },
+  { color: 'black', king: {x:0,y:1,z:1}, rook: {x:0,y:0,z:0} },
+  { color: 'black', king: {x:0,y:1,z:1}, rook: {x:0,y:3,z:0} },
+  { color: 'black', king: {x:0,y:1,z:1}, rook: {x:0,y:0,z:3} },
+  { color: 'black', king: {x:0,y:2,z:2}, rook: {x:0,y:0,z:3} },
+  { color: 'black', king: {x:0,y:2,z:2}, rook: {x:0,y:3,z:0} },
+];
+
+/**
+ * Compute a QuadLevel FEN string from the current frontend board state.
+ * Format: {board} {side} {castling} {ep} {halfmove} {fullmove}
+ * Board: levels 1–4 separated by '|', ranks 8→1 by '/', pieces PNBRQKpnbrqk
+ */
+function computeFen(pieces, turn, lastMoveObj, moveHistLen) {
+  const fenChar = (t, color) => {
+    const map = { K: 'K', Q: 'Q', R: 'R', B: 'B', N: 'N', p: 'P' };
+    const ch = map[t] || '?';
+    return color === 'white' ? ch : ch.toLowerCase();
+  };
+
+  // Build 3D board array: [level][rankIndex][file]
+  const boardArr = Array.from({ length: 4 }, () =>
+    Array.from({ length: 8 }, () => Array(4).fill(null))
+  );
+  for (const p of pieces) {
+    const rankIdx = 7 - p.x;
+    if (p.z >= 0 && p.z < 4 && rankIdx >= 0 && rankIdx < 8 && p.y >= 0 && p.y < 4)
+      boardArr[p.z][rankIdx][p.y] = fenChar(p.t, p.color);
+  }
+
+  let board = '';
+  for (let lv = 0; lv < 4; lv++) {
+    if (lv > 0) board += '|';
+    for (let r = 7; r >= 0; r--) {
+      if (r < 7) board += '/';
+      let empty = 0;
+      for (let f = 0; f < 4; f++) {
+        const ch = boardArr[lv][r][f];
+        if (!ch) { empty++; } else {
+          if (empty > 0) { board += empty; empty = 0; }
+          board += ch;
+        }
+      }
+      if (empty > 0) board += empty;
+    }
+  }
+
+  const side = turn === 'black' ? 'b' : 'w';
+
+  // Castling rights: check each CastleEntry for unmoved king+rook at start squares
+  let rights = 0;
+  for (let i = 0; i < CASTLE_ENTRIES.length; i++) {
+    const ce = CASTLE_ENTRIES[i];
+    const king = pieces.find(p => p.t === 'K' && p.color === ce.color &&
+      p.x === ce.king.x && p.y === ce.king.y && p.z === ce.king.z && !p.hasMoved);
+    const rook = pieces.find(p => p.t === 'R' && p.color === ce.color &&
+      p.x === ce.rook.x && p.y === ce.rook.y && p.z === ce.rook.z && !p.hasMoved);
+    if (king && rook) rights |= (1 << i);
+  }
+  const castleStr = rights === 0 ? '-' : rights.toString(16);
+
+  // En passant square
+  let epStr = '-';
+  if (lastMoveObj && lastMoveObj.doubleStep && lastMoveObj.from && lastMoveObj.to) {
+    const epX = (lastMoveObj.from.x + lastMoveObj.to.x) / 2;
+    const epLevel = lastMoveObj.from.z + 1;
+    const epFile = String.fromCharCode(97 + lastMoveObj.from.y);
+    const epRank = 8 - epX;
+    epStr = '' + epLevel + epFile + epRank;
+  }
+
+  const halfmove = 0;
+  const fullmove = Math.max(1, (moveHistLen || 0) + (turn === 'white' ? 1 : 0));
+
+  return `${board} ${side} ${castleStr} ${epStr} ${halfmove} ${fullmove}`;
+}
+
 const GLOBAL_PIECE_SCALE = {
   pawn: 0.009,
   knight: 0.009,
@@ -34,8 +127,10 @@ const DRAG_LEVEL_SCALE = [0.6, 0.7, 0.8, 1.0];
 // - MOVE_HIT_RADIUS: invisible hit-sphere radius (world units) around indicator
 const MOVE_PIXEL_THRESH = 90; // pixels
 const MOVE_WORLD_THRESH = 1.6; // world units
-const MOVE_HIT_RADIUS = 0.42; // world units (balanced for clicks without being too sensitive)
-const DRAG_PIXEL_THRESHOLD = 8; // minimum pixels to move before drag starts
+const MOVE_HIT_RADIUS = 0.27; // world units — narrower for precise drop targeting
+const PIECE_HIT_RADIUS = 0.45; // world units — radius of flat pickup disc (tweak me)
+const PIECE_HIT_DISC_Y = 0.08; // world units — height of disc above board surface (tweak me)
+const DRAG_PIXEL_THRESHOLD = 11; // minimum pixels to move before drag starts
 
 // Y positions for each logical level `z` (index 0 = TOP board, index 3 = BOTTOM board)
 const LEVEL_Y = [6.02, 4.35, 2.3, -0.2];
@@ -408,13 +503,13 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
   return false;
 }
     // Returns a board X-scale that shrinks on smaller screens and grows on 4K screens.
-    // Range: 0.68 (≤768 px wide) → 0.85 (≥2560 px wide), linearly interpolated.
+    // Range: 0.62 (≤768 px wide) → 0.78 (≥2560 px wide), linearly interpolated.
     function useBoardXScale() {
       const compute = () => {
         const w = window.innerWidth;
-        if (w <= 768) return 0.68;
-        if (w >= 2560) return 0.85;
-        return 0.68 + (0.85 - 0.68) * (w - 768) / (2560 - 768);
+        if (w <= 768) return 0.62;
+        if (w >= 2560) return 0.78;
+        return 0.62 + (0.78 - 0.62) * (w - 768) / (2560 - 768);
       };
       const [xs, setXs] = useState(compute);
       useEffect(() => {
@@ -428,7 +523,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
     function Square({ position, color, xs }) {
       // Create a parallelogram-shaped square matching the board's shear angle
       const geometry = useMemo(() => {
-        const shear = 0.45; // Shear factor matching board layout
+        const shear = 0.475; // Shear factor matching board layout
         const geo = new THREE.BufferGeometry();
         
         // Parallelogram vertices: back edge straight, front edge sheared
@@ -436,13 +531,13 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           // Bottom face (y = -0.075)
           -0.5*xs, -0.075, -0.5,                    // 0: back-left
           0.5*xs, -0.075, -0.5,                     // 1: back-right
-          (0.5 + shear)*xs, -0.075, 0.45,           // 2: front-right (sheared)
+          (0.5 + shear)*xs, -0.075, 0.475,           // 2: front-right (sheared)
           (-0.5 + shear)*xs, -0.075, 0.5,           // 3: front-left (sheared)
           // Top face (y = 0.075)
           -0.5*xs, 0.075, -0.5,                     // 4: back-left
           0.5*xs, 0.075, -0.5,                      // 5: back-right
-          (0.5 + shear)*xs, 0.075, 0.45,            // 6: front-right (sheared)
-          (-0.5 + shear)*xs, 0.075, 0.45            // 7: front-left (sheared)
+          (0.5 + shear)*xs, 0.075, 0.475,            // 6: front-right (sheared)
+          (-0.5 + shear)*xs, 0.075, 0.475            // 7: front-left (sheared)
         ]);
         
         const indices = new Uint16Array([
@@ -485,7 +580,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const isWhite = flipBoard ? !baseWhite : baseWhite;
           // Parallelogram layout: x direction goes straight, y direction goes at an angle
           // x=0,y=0 is farthest left, x=7,y=3 is farthest right
-          const shearFactor = 0.45; // Y contributes to X position (creates parallelogram)
+          const shearFactor = 0.475; // Y contributes to X position (creates parallelogram)
           const worldX = (x + yIndex * shearFactor - 4.1) * xs;  // Center the board
           const worldZ = yIndex;  // Y goes in Z direction
           squares.push(
@@ -512,7 +607,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       );
     }
 
-    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped }) {
+    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped, coordMoveHistoryRef, setCoordMoveHistory }) {
       const boardXScale = useBoardXScale();
       const levels = LEVEL_Y;
       const pieces = [];
@@ -533,7 +628,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         const effectiveLX = shouldFlip ? (7 - lx) : lx;
         // Parallelogram layout: x direction goes straight, y direction goes at an angle
         const effectiveLY = 3 - ly;  // flip ly for visual consistency
-        const shearFactor = 0.45;
+        const shearFactor = 0.475;
         const wx = (effectiveLX + effectiveLY * shearFactor - 3.88) * boardXScale;  // Center the board
         const wy = levels[lz] + 0.09;
         const wz = effectiveLY - 0.06;  // Y goes in Z direction, centered
@@ -1058,6 +1153,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               }
             }}
           >
+            {/* Pickup hit disc — flat horizontal circle lying on board surface, no vertical overlap between levels */}
+            {/* Tune: PIECE_HIT_RADIUS (disc size), PIECE_HIT_DISC_Y (height above board surface) */}
+            <mesh position={[0, PIECE_HIT_DISC_Y, 0]} rotation={[0, 0, 0]} renderOrder={0}>
+              <cylinderGeometry args={[PIECE_HIT_RADIUS, PIECE_HIT_RADIUS, 0.04, 16]} />
+              <meshBasicMaterial transparent={true} opacity={0} depthWrite={false} />
+            </mesh>
             <primitive
               object={(clones && clones[`${p.t}-${isWhite ? 'white' : '#615c5c'}`]) ? clones[`${p.t}-${isWhite ? 'white' : '#615c5c'}`].clone(true) : cloneAndColor(gltf, isWhite ? '#ffffff' : '#615c5c')}
               scale={[s * PIECE_ASPECT_RATIO[0], s * PIECE_ASPECT_RATIO[1], s * PIECE_ASPECT_RATIO[2]]}
@@ -1244,6 +1345,17 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             return next;
           } catch (e) { return prev; }
         });
+        // record raw coord move for Stockfish synchronously
+        try {
+          if (moverBefore && finalTarget && typeof finalTarget.x === 'number' && typeof finalTarget.y === 'number' && typeof finalTarget.z === 'number' && coordMoveHistoryRef) {
+            const fromSq = `${moverBefore.z + 1}${String.fromCharCode(97 + moverBefore.y)}${8 - moverBefore.x}`;
+            const toSq   = `${finalTarget.z + 1}${String.fromCharCode(97 + finalTarget.y)}${8 - finalTarget.x}`;
+            const coordMove = fromSq + toSq;
+            console.log('Pieces moveTo coordMove:', coordMove);
+            coordMoveHistoryRef.current = [...coordMoveHistoryRef.current, coordMove];
+            if (typeof setCoordMoveHistory === 'function') setCoordMoveHistory(coordMoveHistoryRef.current);
+          }
+        } catch (e) { console.debug('Pieces coordMoveHistory error', e); }
         // record notation into moveHistory (use moverBefore.color for which side moved)
         try {
           const side = moverBefore ? moverBefore.color : null;
@@ -1388,7 +1500,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           if (!chosenMove) {
             // Inverse parallelogram transformation: wx = lx + ly*0.4 - 4.4, wz = ly - 1.5
             // Solving: ly = wz + 1.5, lx = wx - ly*0.4 + 4.4
-            const shearFactor = 0.45;
+            const shearFactor = 0.475;
             const yIndex = v.z + 1.5;  // ly (but flipped is 3-ly)
             const lx = Math.round(v.x - yIndex * shearFactor + 4.6);
             const ly = Math.round(3 - yIndex);  // flip back to logical ly
@@ -1441,7 +1553,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         }
         return (
           <group key={`move-ind-${i}`} position={indicatorPos}>
-            <mesh key={`move-ind-hit-${i}`} onPointerUp={(e) => { 
+            <mesh key={`move-ind-hit-${i}`} onPointerUp={(e) => {
+              // Only fire moveTo if: dragging a selected piece, clicking blank space, or
+              // clicking the already-selected piece. If pointer went DOWN on a DIFFERENT piece,
+              // let the event bubble so the canvas can handle piece selection instead.
+              const pressedDifferentPiece = pointerDownPieceRef.current && pointerDownPieceRef.current !== selectedPieceId;
+              if (pressedDifferentPiece) return; // don't stop propagation — let canvas select the new piece
               e.stopPropagation(); 
               moveTo(m);
               // Clean up drag state (since we're stopping propagation, canvas handler won't run)
@@ -1456,7 +1573,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               <sphereGeometry args={[MOVE_HIT_RADIUS, 8, 8]} />
               <meshBasicMaterial transparent={true} opacity={0} depthTest={false} depthWrite={false} />
             </mesh>
-            <mesh key={`move-ind-vis-${i}`} onPointerUp={(e) => { 
+            <mesh key={`move-ind-vis-${i}`} onPointerUp={(e) => {
+              const pressedDifferentPiece = pointerDownPieceRef.current && pointerDownPieceRef.current !== selectedPieceId;
+              if (pressedDifferentPiece) return;
               e.stopPropagation(); 
               moveTo(m);
               // Clean up drag state (since we're stopping propagation, canvas handler won't run)
@@ -1540,8 +1659,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [statusMessage, setStatusMessage] = useState('');
         const [lastMove, setLastMove] = useState(null); // track last move for en-passant (double-step)
       const [aiSide, setAiSide] = useState(null);
+      const [useStockfish, setUseStockfish] = useState(true); // default Smart AI (Stockfish backend)
+      const useStockfishRef = useRef(true); // ref so setTimeout closure always reads current value
+      useEffect(() => { useStockfishRef.current = useStockfish; }, [useStockfish]);
       const [selectedPieceId, setSelectedPieceId] = useState(null);
       const [moveHistory, setMoveHistory] = useState([]); // array of { white: string|null, black: string|null }
+      const [coordMoveHistory, setCoordMoveHistory] = useState([]); // flat array of raw coord strings e.g. "2d82c6" — sent to Stockfish backend
       const [canvasKey, setCanvasKey] = useState(0);
       useEffect(() => {
         try { console.debug('canvasKey changed ->', canvasKey); } catch (e) {}
@@ -1592,12 +1715,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const groupRef = useRef();
       const sceneScale = 0.470;
       // load models once at App level and pass to children
-      const kingGltf = useGLTF('/models/king2.glb');
-      const pawnGltf = useGLTF('/models/pawn2.glb');
-      const knightGltf = useGLTF('/models/knight_-_staunton_full_size_chess_set.glb');
-      const bishopGltf = useGLTF('/models/bishop_-_staunton_full_size_chess_set.glb');
-      const rookGltf = useGLTF('/models/rook_-_staunton_full_size_chess_set.glb');
-      const queenGltf = useGLTF('/models/queen_-_staunton_full_size_chess_set.glb');
+      const kingGltf = useGLTF('/models/King_small.glb');
+      const pawnGltf = useGLTF('/models/pawn_small.glb');
+      const knightGltf = useGLTF('/models/knight_small.glb');
+      const bishopGltf = useGLTF('/models/bishop_small.glb');
+      const rookGltf = useGLTF('/models/rook_small.glb');
+      const queenGltf = useGLTF('/models/queen_small.glb');
 
       // build a cache of normalized clones per piece type + color so ghost and piece share same object
       const clones = useMemo(() => {
@@ -1688,6 +1811,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           
           setPiecesState(getInitialPieces());
           setMoveHistory([]);
+          setCoordMoveHistory([]);
+          coordMoveHistoryRef.current = [];
           setCurrentTurn('white');
           setLastMove(null);
           setAiSide(null);
@@ -1700,6 +1825,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       };
       const prevPiecesRef = useRef(piecesState);
       const prevMoveHistoryRef = useRef(moveHistory);
+      const coordMoveHistoryRef = useRef([]); // ref copy so Stockfish timeout closure always sees latest
+      useEffect(() => { coordMoveHistoryRef.current = coordMoveHistory; }, [coordMoveHistory]);
       const statesHistoryRef = useRef([]); // stack of previous full states for take-back
 
       // push a shallow snapshot of the full app state for take-back
@@ -1709,6 +1836,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const snap = {
             piecesState: (piecesState || []).map(p => ({ ...p })),
             moveHistory: (moveHistory || []).slice(),
+            coordMoveHistory: (coordMoveHistoryRef.current || []).slice(),
             currentTurn,
             lastMove,
             aiSide,
@@ -1768,7 +1896,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
         if (target && target.castle) {
           const startLevel = mover.z + 1;
-          const endLevel = (target.castle && target.castle.rookTo) ? target.castle.rookTo.z + 1 : (target.z != null ? target.z + 1 : mover.z + 1);
+          // endLevel = the king's destination level (target.z), NOT the rook's rookTo level
+          const endLevel = (target.z != null) ? target.z + 1 : mover.z + 1;
           const o = target.castle.type === 'queen' ? 'O-O-O' : 'O-O';
           return `${startLevel}${o}${endLevel}${checkSuffix}`;
         }
@@ -1843,6 +1972,107 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         }
         return res;
       }, [simulateMove, canPieceMoveTo, isAnyKingInCheck]);
+
+      // Rebuild coordMoveHistory by simulating from the initial position using stored algebraic notation.
+      // Called automatically when loading old saves that predate coordMoveHistory persistence.
+      const rebuildCoordMoveHistory = useCallback((historyOverride) => {
+        try {
+          const hist = historyOverride || moveHistory;
+          if (!hist || hist.length === 0) return [];
+          const parseQLlocal = (s) => {
+            const m = s && s.match(/^([1-4])([a-h])([1-8])$/);
+            if (!m) return null;
+            return { z: Number(m[1]) - 1, y: m[2].charCodeAt(0) - 97, x: 8 - Number(m[3]) };
+          };
+          const coordToStr = (p) => `${p.z + 1}${String.fromCharCode(97 + p.y)}${8 - p.x}`;
+          let simPieces = getInitialPieces();
+          const coordMoves = [];
+          for (const entry of hist) {
+            for (const color of ['white', 'black']) {
+              const raw = entry[color];
+              if (!raw) continue;
+              // Castling: e.g. "1O-O2" or "1O-O-O2"
+              if (/O-O/.test(raw)) {
+                const queenSide = raw.includes('O-O-O');
+                const levelMatch = raw.match(/^(\d)O-O(?:-O)?(\d)/);
+                const z_from = levelMatch ? Number(levelMatch[1]) - 1 : null;
+                const z_to   = levelMatch ? Number(levelMatch[2]) - 1 : null;
+                const king = simPieces.find(p => p.color === color && p.t === 'K' && (z_from === null || p.z === z_from));
+                if (king) {
+                  const legal = getAllLegalMoves(simPieces, color) || [];
+                  const kingMoves = legal.filter(mv => mv.moverId === king.id && (z_to === null || mv.z === z_to));
+                  const castleMove = queenSide
+                    ? kingMoves.reduce((b, mv) => (!b || mv.y < b.y) ? mv : b, null)
+                    : kingMoves.reduce((b, mv) => (!b || mv.y > b.y) ? mv : b, null);
+                  if (castleMove) {
+                    coordMoves.push(coordToStr(king) + coordToStr(castleMove));
+                    const kingOrigX = king.x, kingOrigZ = king.z;
+                    try { simPieces = simulateMove(simPieces, king.id, { x: castleMove.x, y: castleMove.y, z: castleMove.z }); } catch (e) {}
+                    // simulateMove doesn't know about the rook without castle metadata — move it manually
+                    try {
+                      const rookCandidates = simPieces.filter(p => p.color === color && p.t === 'R' && p.x === kingOrigX && p.z === kingOrigZ);
+                      const rook = queenSide
+                        ? rookCandidates.reduce((b, r) => (!b || r.y < b.y) ? r : b, null)  // queenside: a-side rook
+                        : rookCandidates.reduce((b, r) => (!b || r.y > b.y) ? r : b, null); // kingside: h-side rook
+                      if (rook) {
+                        const rookDestY = queenSide ? castleMove.y + 1 : castleMove.y - 1;
+                        simPieces = simPieces.map(p =>
+                          p.id === rook.id ? { ...p, x: castleMove.x, y: rookDestY, z: castleMove.z, hasMoved: true } : p
+                        );
+                      }
+                    } catch (e) { console.warn('rebuildCoordMoveHistory: rook castle fix failed', e); }
+                  }
+                }
+                continue;
+              }
+              // Extract all coord squares from notation (e.g. "N(2d8)x3c4" → ["2d8","3c4"])
+              const sqRe = /([1-4][a-h][1-8])/g;
+              const squares = [];
+              let sqm;
+              while ((sqm = sqRe.exec(raw)) !== null) squares.push(sqm[1]);
+              const destStr = squares[squares.length - 1];
+              const srcStr  = squares.length >= 2 ? squares[0] : null;
+              if (!destStr) continue;
+              const toCoord   = parseQLlocal(destStr);
+              const fromCoord = srcStr ? parseQLlocal(srcStr) : null;
+              const pieceLetterMatch = raw.match(/^([NBRQK])/);
+              const pieceLetter = pieceLetterMatch ? pieceLetterMatch[1] : 'p';
+              let foundPiece = null;
+              // Direct lookup if source square is encoded in notation
+              if (fromCoord) {
+                foundPiece = simPieces.find(p => p.color === color && p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z);
+              }
+              // Otherwise use legal moves
+              if (!foundPiece && toCoord) {
+                const legal = getAllLegalMoves(simPieces, color) || [];
+                const candidates = legal.filter(mv => mv.x === toCoord.x && mv.y === toCoord.y && mv.z === toCoord.z);
+                const typed = candidates.filter(mv => {
+                  const pp = simPieces.find(p => p.id === mv.moverId);
+                  return pp && (pieceLetter === 'p' ? pp.t === 'p' : pp.t === pieceLetter);
+                });
+                const pool = typed.length > 0 ? typed : candidates;
+                if (pool.length > 0) foundPiece = simPieces.find(p => p.id === pool[0].moverId);
+              }
+              if (foundPiece && toCoord) {
+                coordMoves.push(coordToStr(foundPiece) + coordToStr(toCoord));
+                try { simPieces = simulateMove(simPieces, foundPiece.id, toCoord); } catch (e) {
+                  console.warn('rebuildCoordMoveHistory: simulateMove failed for', raw, e);
+                }
+              } else {
+                console.warn('rebuildCoordMoveHistory: could not resolve move', raw, '(color:', color, ')');
+              }
+            }
+          }
+          console.log('rebuildCoordMoveHistory: reconstructed', coordMoves.length, 'coord moves from', hist.length, 'history entries');
+          coordMoveHistoryRef.current = coordMoves;
+          setCoordMoveHistory(coordMoves);
+          return coordMoves;
+        } catch (e) {
+          console.warn('rebuildCoordMoveHistory failed:', e);
+          return [];
+        }
+      }, [moveHistory, getAllLegalMoves]);
+
       const evaluatePosition = useCallback((pieces, color) => {
         // stronger material emphasis and center control with piece-safety penalization
         const vals = { p: 1, N: 3, B: 3, R: 5, Q: 9, K: 10000 };
@@ -2811,6 +3041,19 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             console.log('applyMove: moveAppliedRef.current=', moveAppliedRef.current, 'notation=', finalNotationComputed); 
           } catch (e) {}
 
+          // Always record raw coord move for Stockfish — independent of notation/moveAppliedRef
+          // so the engine always gets the correct move list regardless of notation edge-cases
+          try {
+            if (moverBeforeSnap && finalTarget && typeof finalTarget.x === 'number' && typeof finalTarget.y === 'number' && typeof finalTarget.z === 'number') {
+              const fromSq = `${moverBeforeSnap.z + 1}${String.fromCharCode(97 + moverBeforeSnap.y)}${8 - moverBeforeSnap.x}`;
+              const toSq   = `${finalTarget.z + 1}${String.fromCharCode(97 + finalTarget.y)}${8 - finalTarget.x}`;
+              const coordMove = fromSq + toSq;
+              console.log('applyMove coordMove:', coordMove);
+              coordMoveHistoryRef.current = [...coordMoveHistoryRef.current, coordMove];
+              setCoordMoveHistory(coordMoveHistoryRef.current);
+            }
+          } catch (e) { console.debug('coordMoveHistory update error', e); }
+
           setSelectedPieceId(null);
           
           // Only toggle turn if the move was actually applied (not a duplicate)
@@ -2840,7 +3083,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         } finally {
           moveLockRef.current = false;
         }
-      }, [piecesState, setPiecesState, setMoveHistory, setSelectedPieceId, setCurrentTurn, setLastMove, pushStateSnapshot, generateMoveNotation, moveHistory, currentTurn]);
+      }, [piecesState, setPiecesState, setMoveHistory, setCoordMoveHistory, setSelectedPieceId, setCurrentTurn, setLastMove, pushStateSnapshot, generateMoveNotation, moveHistory, currentTurn]);
 
       // take-back: undo last ply (or last two plies if playing against AI)
       const takeBack = useCallback(() => {
@@ -2873,6 +3116,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           // restore full state
           try { setPiecesState(restored.piecesState || []); } catch (e) {}
           try { setMoveHistory(restored.moveHistory || []); } catch (e) {}
+          // restore coordMoveHistory so Stockfish replay stays in sync after take-back
+          try { const restoredCoord = restored.coordMoveHistory || []; coordMoveHistoryRef.current = restoredCoord.slice(); setCoordMoveHistory(restoredCoord); } catch (e) {}
           try { setCurrentTurn(restored.currentTurn || 'white'); } catch (e) {}
           try { setLastMove(restored.lastMove || null); } catch (e) {}
           // also restore aiSide/gameStarted to avoid logic mismatches after undo
@@ -3113,8 +3358,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             try { console.log('importGame: Set aiLastMoveCountRef to', importedMoveCount - 1, 'for imported history with', importedMoveCount, 'moves'); } catch (e) {}
             // Update prevMoveHistoryRef immediately so duplicate detection works correctly
             prevMoveHistoryRef.current = (obj.moveHistory || []).slice();
+            const importedCoord = obj.coordMoveHistory || [];
+            coordMoveHistoryRef.current = importedCoord.slice();
             setPiecesState(obj.piecesState);
             setMoveHistory(obj.moveHistory || []);
+            setCoordMoveHistory(importedCoord);
             setCurrentTurn(obj.currentTurn || 'white');
             setLastMove(obj.lastMove || null);
             try { setAiSide(obj.aiSide || null); } catch (e) {}
@@ -3126,7 +3374,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
       const saveToLocal = () => {
         try {
-          const payload = { piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted };
+          const payload = { piecesState, moveHistory, coordMoveHistory, currentTurn, lastMove, aiSide, gameStarted };
           localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
           alert('Saved locally');
         } catch (e) { alert('Local save failed'); }
@@ -3146,8 +3394,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           try { console.log('loadFromLocal: Set aiLastMoveCountRef to', loadedMoveCount - 1, 'for loaded history with', loadedMoveCount, 'moves'); } catch (e) {}
           // Update prevMoveHistoryRef immediately so duplicate detection works correctly
           prevMoveHistoryRef.current = (obj.moveHistory || []).slice();
+          const localCoord = obj.coordMoveHistory || [];
+          coordMoveHistoryRef.current = localCoord.slice();
           setPiecesState(obj.piecesState || []);
           setMoveHistory(obj.moveHistory || []);
+          setCoordMoveHistory(localCoord);
           setCurrentTurn(obj.currentTurn || 'white');
           setLastMove(obj.lastMove || null);
           try { setAiSide(obj.aiSide || null); } catch (e) {}
@@ -3157,7 +3408,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
       const saveToServer = async () => {
         try {
-          const payload = { state: { piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted } };
+          const payload = { state: { piecesState, moveHistory, coordMoveHistory, currentTurn, lastMove, aiSide, gameStarted } };
           const existingId = localStorage.getItem(SERVER_ID_KEY);
           const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
           if (existingId) {
@@ -3277,8 +3528,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             } catch (e) {}
             // Update prevMoveHistoryRef immediately so duplicate detection works correctly
             prevMoveHistoryRef.current = (s.moveHistory || []).slice();
+            const serverCoord = s.coordMoveHistory || [];
+            coordMoveHistoryRef.current = serverCoord.slice();
             setPiecesState(s.piecesState || []);
             setMoveHistory(s.moveHistory || []);
+            setCoordMoveHistory(serverCoord);
             setCurrentTurn(s.currentTurn || 'white');
             setLastMove(s.lastMove || null);
             try { setAiSide(s.aiSide || null); } catch (e) {}
@@ -3473,6 +3727,107 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             try {
               // Clear timeout ref when we start executing  (timeout has fired)
               aiTimeoutRef.current = { id: null, moveCount: null };
+
+              // ── Stockfish backend path ──────────────────────────────────────────
+              let stockfishAttempted = false;
+              if (useStockfishRef.current && aiSide) {
+                try {
+                  // Use raw coordinate move list (e.g. "2d82c6") — guaranteed parseable by C++ engine
+                  // This avoids divergence from algebraic notation the engine may not fully understand
+
+                  // Safety: if coord history is out of sync (e.g. loaded from old save without coordMoveHistory),
+                  // rebuild it by simulating from start using the stored algebraic notation.
+                  const expectedHalfMoves = (moveHistory || []).reduce((s, e) => s + (e.white ? 1 : 0) + (e.black ? 1 : 0), 0);
+                  if (coordMoveHistoryRef.current.length < expectedHalfMoves - 1) {
+                    console.log('Stockfish: coordMoveHistory out of sync (have', coordMoveHistoryRef.current.length, ', expected ~', expectedHalfMoves, ') — rebuilding...');
+                    rebuildCoordMoveHistory();
+                  }
+
+                  const movesFlat = coordMoveHistoryRef.current.slice();
+                  console.log('Stockfish coord moves:', movesFlat);
+                  // Compute FEN from current board state — avoids castling/move-replay desync
+                  const livePiecesForFen = prevPiecesRef.current || piecesState || [];
+                  const fenStr = computeFen(livePiecesForFen, currentTurn, lastMove, (moveHistory || []).length);
+                  console.log('Stockfish FEN:', fenStr);
+                  // Always hit the local backend for Stockfish (not the production CDN URL)
+                  const sfDepth = 8;
+                  const sfTimeMs = 5000;
+                  const sfUrl = 'http://localhost:5000/api/ai/bestmove';
+                  console.log('Calling Stockfish at', sfUrl, 'fen:', fenStr);
+                  const sfResp = await fetch(sfUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fen: fenStr, moves: movesFlat, depth: sfDepth, timeMs: sfTimeMs }),
+                    signal: AbortSignal.timeout(sfTimeMs + 8000)
+                  });
+                  console.log('Stockfish HTTP status:', sfResp.status);
+                  if (sfResp.ok) {
+                    const sfResult = await sfResp.json();
+                    stockfishAttempted = true; // Stockfish responded — do NOT fall back to JS AI
+                    console.log('Stockfish result:', sfResult);
+                    // Parse LfileRank notation (e.g. "1a4") → internal {x,y,z}
+                    const parseQL = (s) => {
+                      const m = s && s.match(/^([1-4])([a-h])([1-8])$/);
+                      if (!m) return null;
+                      return { z: Number(m[1]) - 1, y: m[2].charCodeAt(0) - 97, x: 8 - Number(m[3]) };
+                    };
+                    const toCoord = parseQL(sfResult.toNotation);
+                    const fromCoord = parseQL(sfResult.fromNotation);
+                    // Log every piece that is on the from-square regardless of color, to diagnose lookup failures
+                    const livePiecesAll = prevPiecesRef.current || piecesState || [];
+                    const piecesAtFrom = fromCoord ? livePiecesAll.filter(p => p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z) : [];
+                    console.log('Stockfish lookup debug: fromCoord=', fromCoord, 'toCoord=', toCoord,
+                      'aiSide=', aiSide, 'livePieces.length=', livePiecesAll.length,
+                      'piecesAtFromSquare=', piecesAtFrom);
+                    if (toCoord) {
+                      // Use prevPiecesRef.current — piecesState closure is stale inside setTimeout
+                      const livePieces = livePiecesAll.length > 0 ? livePiecesAll : (piecesState || []);
+                      let mover = null;
+                      // Find piece at source square — no color filter needed, Stockfish only returns moves for aiSide
+                      if (fromCoord) {
+                        mover = livePieces.find(p =>
+                          p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z
+                        );
+                        if (mover) console.log('Stockfish: found mover by fromCoord', fromCoord, mover);
+                      }
+                      // Fallback: any legal move whose source AND destination both match
+                      if (!mover) {
+                        console.warn('Stockfish: no piece at fromCoord', fromCoord, '— searching legal moves for toCoord', toCoord);
+                        const allLegal = getAllLegalMoves(livePieces, aiSide) || [];
+                        console.log('Stockfish: legal moves for', aiSide, allLegal.length, 'moves');
+                        // First try: match both source and destination
+                        let match = fromCoord
+                          ? allLegal.find(mv =>
+                              mv.x === toCoord.x && mv.y === toCoord.y && mv.z === toCoord.z &&
+                              livePieces.find(p => p.id === mv.moverId && p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z)
+                            )
+                          : null;
+                        // Second try: destination only
+                        if (!match) match = allLegal.find(mv => mv.x === toCoord.x && mv.y === toCoord.y && mv.z === toCoord.z);
+                        if (match) mover = livePieces.find(p => p.id === match.moverId);
+                      }
+                      if (mover) {
+                        applyMove(mover.id, toCoord);
+                        console.log('Stockfish move applied:', sfResult.raw, '→ piece', mover.t, mover.color, 'to', toCoord);
+                        return; // done — skip JS negamax
+                      }
+                      console.warn('Stockfish: could not map move to piece, falling back to JS AI', sfResult, 'fromCoord:', fromCoord, 'toCoord:', toCoord);
+                    }
+                  } else {
+                    const errBody = await sfResp.text().catch(() => '(no body)');
+                    console.warn('Stockfish API returned', sfResp.status, '— body:', errBody, '— falling back to JS AI');
+                  }
+                } catch (sfErr) {
+                  console.warn('Stockfish call failed, falling back to JS AI:', sfErr);
+                }
+              }
+              // ── end Stockfish path ────────────────────────────────────────────
+              // If Stockfish responded (even if piece lookup failed), do not run JS AI
+              if (stockfishAttempted) {
+                console.warn('Stockfish responded but piece lookup failed — skipping JS AI to avoid override');
+                return;
+              }
+
               // Random opening move for AI White
               if (aiSide === 'white' && moveHistory.length === 0) {
                 const openingMoves = ['2c4', '2b4', '3c4', '3b4'];
@@ -4477,7 +4832,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             }
           }
         };
-      }, [currentTurn, aiSide, piecesState, gameOver, moveHistory, getAllLegalMoves, simulateMove, negamax, applyMove, generateMoveNotation, orderMoves, isAnyKingInCheck, staticExchangeEval, attackersOfSquare]);
+      }, [currentTurn, aiSide, useStockfish, piecesState, gameOver, moveHistory, getAllLegalMoves, simulateMove, negamax, applyMove, generateMoveNotation, orderMoves, isAnyKingInCheck, staticExchangeEval, attackersOfSquare, rebuildCoordMoveHistory]);
 
       // keep OrbitControls enabled state in sync with pointer interaction/dragging
       useEffect(() => {
@@ -4556,6 +4911,17 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   <button className="menu-button" onClick={() => { resetGame(); setAiSide('black'); setGameStarted(true); setMobileMenuOpen(false); }}>
                     Play AI Black
                   </button>
+                  <hr />
+                  <input ref={importInputRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => { if (e.target.files && e.target.files[0]) { importGame(e.target.files[0]); setGameStarted(true); } e.target.value = null; }} />
+                  <button className="menu-button" onClick={() => { importInputRef.current && importInputRef.current.click(); setMobileMenuOpen(false); }}>Import Game</button>
+                  <hr />
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer', marginTop: 4 }}>
+                    AI: 
+                    <select value={useStockfish ? 'smart' : 'dumb'} onChange={e => setUseStockfish(e.target.value === 'smart')} style={{ fontSize: 12 }}>
+                      <option value="smart">Smart AI</option>
+                      <option value="dumb">Dumb AI</option>
+                    </select>
+                  </label>
                 </>
               ) : (
                 <>
@@ -4577,6 +4943,14 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               >
                 Take Back
               </button>
+              <hr />
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer', marginTop: 4 }}>
+                AI: 
+                <select value={useStockfish ? 'smart' : 'dumb'} onChange={e => setUseStockfish(e.target.value === 'smart')} style={{ fontSize: 12 }}>
+                  <option value="smart">Smart AI</option>
+                  <option value="dumb">Dumb AI</option>
+                </select>
+              </label>
               </>
               )
             }
@@ -4822,6 +5196,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     aiSide={aiSide}
                     pushStateSnapshot={pushStateSnapshot}
                     boardFlipped={boardFlipped}
+                    coordMoveHistoryRef={coordMoveHistoryRef}
+                    setCoordMoveHistory={setCoordMoveHistory}
                 />
                 <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} currentTurn={currentTurn} />
                 
