@@ -1,0 +1,32 @@
+﻿  benchmark.cpp
+  bitboard.cpp
+  engine.cpp
+  evaluate.cpp
+  main.cpp
+  memory.cpp
+  misc.cpp
+  movegen.cpp
+  movepick.cpp
+  full_threats.cpp
+  half_ka_v2_hm.cpp
+  network.cpp
+  nnue_accumulator.cpp
+  nnue_misc.cpp
+  position.cpp
+  score.cpp
+  search.cpp
+  tbprobe.cpp
+  thread.cpp
+  timeman.cpp
+  Compiling...
+  tt.cpp
+  tune.cpp
+  uci.cpp
+  ucioption.cpp
+  stockfish_api.cpp
+     Creating library M:\Chess3D\Chess3D_Repo\Stockfish_3D_Port\x64\Release\Stockfish_3D_Port.lib and object M:\Chess3D\Chess3D_Repo\Stockfish_3D_Port\x64\Release\Stockfish_3D_Port.exp
+  Generating code
+  Previous IPDB not found, fall back to full compilation.
+  All 6436 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  Finished generating code
+  Stockfish_3D_Port.vcxproj -> M:\Chess3D\Chess3D_Repo\Stockfish_3D_Port\x64\Release\Stockfish_3D_Port.dll

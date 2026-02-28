@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Stockfish_3D_Port/Stockfish_3D_Port.vcxproj" Id="8371ba04-7e56-4417-b30a-62c6ce2f3be4" />
+</Solution>
