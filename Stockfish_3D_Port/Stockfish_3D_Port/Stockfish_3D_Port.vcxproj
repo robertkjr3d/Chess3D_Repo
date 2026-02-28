@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{8371ba04-7e56-4417-b30a-62c6ce2f3be4}</ProjectGuid>
+    <RootNamespace>Stockfish3DPort</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\stockfish-src\benchmark.cpp" />
+    <ClCompile Include="..\..\stockfish-src\bitboard.cpp" />
+    <ClCompile Include="..\..\stockfish-src\engine.cpp" />
+    <ClCompile Include="..\..\stockfish-src\evaluate.cpp" />
+    <ClCompile Include="..\..\stockfish-src\main.cpp" />
+    <ClCompile Include="..\..\stockfish-src\memory.cpp" />
+    <ClCompile Include="..\..\stockfish-src\misc.cpp" />
+    <ClCompile Include="..\..\stockfish-src\movegen.cpp" />
+    <ClCompile Include="..\..\stockfish-src\movepick.cpp" />
+    <ClCompile Include="..\..\stockfish-src\nnue\features\full_threats.cpp" />
+    <ClCompile Include="..\..\stockfish-src\nnue\features\half_ka_v2_hm.cpp" />
+    <ClCompile Include="..\..\stockfish-src\nnue\network.cpp" />
+    <ClCompile Include="..\..\stockfish-src\nnue\nnue_accumulator.cpp" />
+    <ClCompile Include="..\..\stockfish-src\nnue\nnue_misc.cpp" />
+    <ClCompile Include="..\..\stockfish-src\position.cpp" />
+    <ClCompile Include="..\..\stockfish-src\score.cpp" />
+    <ClCompile Include="..\..\stockfish-src\search.cpp" />
+    <ClCompile Include="..\..\stockfish-src\syzygy\tbprobe.cpp" />
+    <ClCompile Include="..\..\stockfish-src\thread.cpp" />
+    <ClCompile Include="..\..\stockfish-src\timeman.cpp" />
+    <ClCompile Include="..\..\stockfish-src\tt.cpp" />
+    <ClCompile Include="..\..\stockfish-src\tune.cpp" />
+    <ClCompile Include="..\..\stockfish-src\uci.cpp" />
+    <ClCompile Include="..\..\stockfish-src\ucioption.cpp" />
+    <ClCompile Include="..\..\stockfish-src\stockfish_api.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\stockfish-src\benchmark.h" />
+    <ClInclude Include="..\..\stockfish-src\bitboard.h" />
+    <ClInclude Include="..\..\stockfish-src\engine.h" />
+    <ClInclude Include="..\..\stockfish-src\evaluate.h" />
+    <ClInclude Include="..\..\stockfish-src\history.h" />
+    <ClInclude Include="..\..\stockfish-src\incbin\incbin.h" />
+    <ClInclude Include="..\..\stockfish-src\memory.h" />
+    <ClInclude Include="..\..\stockfish-src\misc.h" />
+    <ClInclude Include="..\..\stockfish-src\movegen.h" />
+    <ClInclude Include="..\..\stockfish-src\movepick.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\features\full_threats.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\features\half_ka_v2_hm.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\layers\affine_transform.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\layers\affine_transform_sparse_input.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\layers\clipped_relu.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\layers\sqr_clipped_relu.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\network.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\nnue_accumulator.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\nnue_architecture.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\nnue_common.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\nnue_feature_transformer.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\nnue_misc.h" />
+    <ClInclude Include="..\..\stockfish-src\nnue\simd.h" />
+    <ClInclude Include="..\..\stockfish-src\numa.h" />
+    <ClInclude Include="..\..\stockfish-src\perft.h" />
+    <ClInclude Include="..\..\stockfish-src\position.h" />
+    <ClInclude Include="..\..\stockfish-src\quadlevel_board.h" />
+    <ClInclude Include="..\..\stockfish-src\quadlevel_types.h" />
+    <ClInclude Include="..\..\stockfish-src\score.h" />
+    <ClInclude Include="..\..\stockfish-src\search.h" />
+    <ClInclude Include="..\..\stockfish-src\shm.h" />
+    <ClInclude Include="..\..\stockfish-src\shm_linux.h" />
+    <ClInclude Include="..\..\stockfish-src\syzygy\tbprobe.h" />
+    <ClInclude Include="..\..\stockfish-src\thread.h" />
+    <ClInclude Include="..\..\stockfish-src\thread_win32_osx.h" />
+    <ClInclude Include="..\..\stockfish-src\timeman.h" />
+    <ClInclude Include="..\..\stockfish-src\tt.h" />
+    <ClInclude Include="..\..\stockfish-src\tune.h" />
+    <ClInclude Include="..\..\stockfish-src\types.h" />
+    <ClInclude Include="..\..\stockfish-src\uci.h" />
+    <ClInclude Include="..\..\stockfish-src\ucioption.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>
