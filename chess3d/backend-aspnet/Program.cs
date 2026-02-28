@@ -17,6 +17,19 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// Register QuadLevel Stockfish engine as singleton (optional — null if DLL unavailable at startup)
+try
+{
+    var engine = new QuadLevelEngine();
+    builder.Services.AddSingleton(engine);
+    Console.WriteLine("✓ QuadLevelEngine created successfully");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"⚠ QuadLevelEngine unavailable (Stockfish disabled): {ex.Message}");
+    // Not registered — AiController resolves via GetService<> which returns null safely
+}
+
 // Configure MySQL connection
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 var useMySql = !string.IsNullOrEmpty(connectionString) && connectionString != "DISABLED";

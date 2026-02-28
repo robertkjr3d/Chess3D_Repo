@@ -6,6 +6,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- Native DLL for P/Invoke — copied to output dir so the runtime can find it -->
+  <ItemGroup>
+    <Content Include="c:\Users\rober\Source\Repos\Stockfish_3D_Port\x64\Release\Stockfish_3D_Port.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Stockfish_3D_Port.dll</Link>
+    </Content>
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.0">
