@@ -6,3 +6,5 @@ logs/
 *.suo
 .vs/
 appsettings.Development.json
+appsettings.Production.json
+README.md
