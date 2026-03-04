@@ -1657,11 +1657,18 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [gameOver, setGameOver] = useState(false);
       const [gameWinner, setGameWinner] = useState(null);
       const [statusMessage, setStatusMessage] = useState('');
+      const [halfMoveClock, setHalfMoveClock] = useState(0); // 50-move rule: resets on pawn move or capture
+      const [repetitionCount, setRepetitionCount] = useState(0); // threefold repetition tracking
         const [lastMove, setLastMove] = useState(null); // track last move for en-passant (double-step)
       const [aiSide, setAiSide] = useState(null);
-      const [useStockfish, setUseStockfish] = useState(true); // default Smart AI (Stockfish backend)
-      const useStockfishRef = useRef(true); // ref so setTimeout closure always reads current value
-      useEffect(() => { useStockfishRef.current = useStockfish; }, [useStockfish]);
+      // 'dumb' = JS negamax only | 'smart' = Stockfish depth 8 / 5s | 'smarter' = Stockfish depth 14 / 12s
+      const [aiStrength, setAiStrength] = useState('smart');
+      const aiStrengthRef = useRef('smart');
+      useEffect(() => { aiStrengthRef.current = aiStrength; }, [aiStrength]);
+      // Delay between AI moves in ms (visible on-screen for AI vs AI; also adds think-feel for human games)
+      const [aiDelay, setAiDelay] = useState(1500);
+      const aiDelayRef = useRef(1500);
+      useEffect(() => { aiDelayRef.current = aiDelay; }, [aiDelay]);
       const [selectedPieceId, setSelectedPieceId] = useState(null);
       const [moveHistory, setMoveHistory] = useState([]); // array of { white: string|null, black: string|null }
       const [coordMoveHistory, setCoordMoveHistory] = useState([]); // flat array of raw coord strings e.g. "2d82c6" — sent to Stockfish backend
@@ -1821,6 +1828,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           setGameWinner(null);
           setStatusMessage('');
           setBoardFlipped(false);
+          setHalfMoveClock(0);
+          setRepetitionCount(0);
+          setAiPaused(false);
         } catch (e) { console.debug('resetGame error', e); }
       };
       const prevPiecesRef = useRef(piecesState);
@@ -1841,12 +1851,13 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             lastMove,
             aiSide,
             gameStarted,
+            halfMoveClock,
           };
           statesHistoryRef.current.push(snap);
           try { console.debug('pushed state snapshot (take-back depth)', statesHistoryRef.current.length); } catch (e) {}
           try { if (typeof pushDebug === 'function') pushDebug('pushedSnapshot', { depth: statesHistoryRef.current.length }); } catch (e) {}
         } catch (e) { console.debug('pushStateSnapshot failed', e); }
-      }, [piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted]);
+      }, [piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted, halfMoveClock]);
 
       useEffect(() => { prevMoveHistoryRef.current = moveHistory; }, [moveHistory]);
 
@@ -1887,7 +1898,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             const oppInCheck = isAnyKingInCheck(simulated, opponent);
             const oppLegal = (getAllLegalMoves(simulated, opponent) || []);
             const isMate = oppInCheck && oppLegal.length === 0;
-            checkSuffix = isMate ? '++' : (oppInCheck ? '+' : '');
+            checkSuffix = isMate ? '#' : (oppInCheck ? '+' : '');
           } catch (e) {
             checkSuffix = '';
           }
@@ -2207,6 +2218,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const searchStateRef = useRef({ endTime: 0, cancelled: false });
       const aiLastMoveCountRef = useRef(-1); // Track which move count the AI last played on
       const aiTimeoutRef = useRef({ id: null, moveCount: null }); // Track active AI timeout with its move count
+      const [aiPaused, setAiPaused] = useState(false); // pause AI vs AI
+      const aiPausedRef = useRef(false);
+      useEffect(() => { aiPausedRef.current = aiPaused; }, [aiPaused]);
 
       // helper: order moves (captures first, then center-oriented), prefer moves that reduce undefended pieces
       const orderMoves = useCallback((moves, pieces, side) => {
@@ -2919,6 +2933,18 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           const snapPieces = (prevPiecesRef.current && prevPiecesRef.current.length) ? prevPiecesRef.current : (piecesState || []);
           let moverBeforeSnap = null;
           try { moverBeforeSnap = snapPieces.find(p => p.id === moverId) || null; } catch (e) { moverBeforeSnap = null; }
+
+          // 50-move rule: reset clock on pawn moves or captures, else increment
+          try {
+            const isPawnMove = moverBeforeSnap && moverBeforeSnap.t === 'p';
+            const isCapture = (finalTarget && finalTarget.enPassant) ||
+              snapPieces.some(pp =>
+                pp.x === finalTarget.x && pp.y === finalTarget.y && pp.z === finalTarget.z &&
+                pp.color !== (moverBeforeSnap ? moverBeforeSnap.color : null)
+              );
+            setHalfMoveClock(prev => (isPawnMove || isCapture) ? 0 : prev + 1);
+          } catch (e) {}
+
           let finalNotationComputed = '';
           try {
             // always compute notation from stable pre-move snapshot to avoid races
@@ -3018,12 +3044,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     else copy[copy.length - 1] = { ...copy[copy.length - 1], black: finalNotationComputed };
                   }
                   
-                  // Calculate the NEW move count from the updated history and update ref
-                  // This ensures the ref matches the actual new state, preventing AI from playing again
+                  // Calculate the NEW move count just for the debug log
                   const newMoveCount = copy.reduce((sum, entry) => {
                     return sum + (entry.white ? 1 : 0) + (entry.black ? 1 : 0);
                   }, 0);
-                  aiLastMoveCountRef.current = newMoveCount;
+                  // NOTE: aiLastMoveCountRef is managed exclusively by the AI useEffect.
+                  // Updating it here caused the next AI turn to be blocked in 'both' mode.
                   try { console.debug('applyMove moveHistory updated', { beforeLen: prev ? prev.length : 0, afterLen: copy.length, copyLast: copy[copy.length - 1], newMoveCount, refUpdated: newMoveCount }); } catch (e) {}
                   return copy;
                 });
@@ -3083,7 +3109,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         } finally {
           moveLockRef.current = false;
         }
-      }, [piecesState, setPiecesState, setMoveHistory, setCoordMoveHistory, setSelectedPieceId, setCurrentTurn, setLastMove, pushStateSnapshot, generateMoveNotation, moveHistory, currentTurn]);
+      }, [piecesState, setPiecesState, setMoveHistory, setCoordMoveHistory, setSelectedPieceId, setCurrentTurn, setLastMove, setHalfMoveClock, pushStateSnapshot, generateMoveNotation, moveHistory, currentTurn]);
 
       // take-back: undo last ply (or last two plies if playing against AI)
       const takeBack = useCallback(() => {
@@ -3123,6 +3149,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           // also restore aiSide/gameStarted to avoid logic mismatches after undo
           try { setAiSide(restored.aiSide || null); } catch (e) {}
           try { setGameStarted(!!restored.gameStarted); } catch (e) {}
+          try { setHalfMoveClock(restored.halfMoveClock || 0); } catch (e) {}
           // update refs to reflect restored state
           try { prevPiecesRef.current = (restored.piecesState || []).map(p => ({ ...p })); } catch (e) {}
           try { prevMoveHistoryRef.current = (restored.moveHistory || []).slice(); } catch (e) {}
@@ -3172,9 +3199,81 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         try { pushDebug('moveHistoryChanged', { moveHistory }); } catch (e) {}
       }, [moveHistory]);
 
+      // ── Draw condition helpers ────────────────────────────────────────────────
+      // Returns true if `color` has enough material to force checkmate.
+      // Insufficient = lone king, K+N(s) only, K+same-color bishop(s) only.
+      const hasSufficientMatingMaterial = useCallback((pieces, color) => {
+        const mine = (pieces || []).filter(p => p.color === color && p.t !== 'K');
+        if (mine.length === 0) return false; // lone king
+        // Any pawn, queen, or rook is always sufficient
+        if (mine.some(p => p.t === 'p' || p.t === 'Q' || p.t === 'R')) return true;
+        const bishops = mine.filter(p => p.t === 'B');
+        const knights = mine.filter(p => p.t === 'N');
+        // Bishop + Knight pair
+        if (bishops.length > 0 && knights.length > 0) return true;
+        // 2+ Bishops on DIFFERENT square colors (using 3-axis parity)
+        if (bishops.length >= 2) {
+          const parity = bishops.map(b => (b.x + b.y + b.z) % 2);
+          if (parity.some(p => p === 0) && parity.some(p => p === 1)) return true;
+        }
+        // 2+ Knights is sufficient (can force mate with help)
+        if (knights.length >= 2) return true;
+        return false; // lone knight, or only same-color bishops remain
+      }, []);
+
+      // Auto-scroll the moves list to the bottom whenever a new move is added (desktop only).
+      useEffect(() => {
+        if (isMobile) return;
+        // Use rAF to ensure the browser has finished layout before reading scrollHeight
+        const raf = requestAnimationFrame(() => {
+          try {
+            if (moveListRef.current) {
+              moveListRef.current.scrollTop = moveListRef.current.scrollHeight;
+            }
+          } catch (e) {}
+        });
+        return () => cancelAnimationFrame(raf);
+      }, [moveHistory, isMobile]);
+
+      // Generate a canonical position key for threefold repetition detection.
+      // Encodes: piece placements (sorted by id), side to move, en-passant square, castling rights (hasMoved flags).
+      const positionKey = useCallback((pieces, turn, lm) => {
+        const sorted = (pieces || []).slice().sort((a, b) => (a.id < b.id ? -1 : 1));
+        const pStr = sorted.map(p => `${p.t}${p.color[0]}${p.x},${p.y},${p.z}${p.hasMoved ? 'm' : ''}`).join(';');
+        const epStr = (lm && lm.doubleStep) ? `${lm.to.y},${lm.to.z}` : '';
+        return `${turn}|${pStr}|ep:${epStr}`;
+      }, []);
+
+      // Recount how many times the current position has appeared (current + history snapshots).
+      // Runs after every board/turn/lastMove change. statesHistoryRef stores pre-move snapshots,
+      // so the current rendered state is counted as +1 on top of any matching snapshots.
+      useEffect(() => {
+        try {
+          const currentKey = positionKey(piecesState, currentTurn, lastMove);
+          let count = 1; // the current position itself counts as 1
+          for (const snap of (statesHistoryRef.current || [])) {
+            try {
+              const snapKey = positionKey(snap.piecesState, snap.currentTurn, snap.lastMove);
+              if (snapKey === currentKey) count++;
+            } catch (e) {}
+          }
+          setRepetitionCount(count);
+        } catch (e) {}
+      }, [piecesState, currentTurn, lastMove, positionKey]);
+
       // compute check / checkmate / double-check status whenever board or turn changes
       useEffect(() => {
         try {
+          // ── Insufficient mating material ─────────────────────────────────────
+          const whiteHas = hasSufficientMatingMaterial(piecesState, 'white');
+          const blackHas = hasSufficientMatingMaterial(piecesState, 'black');
+          if (!whiteHas && !blackHas) {
+            setGameOver(true);
+            setGameWinner(null);
+            setStatusMessage('Draw: insufficient mating material');
+            return;
+          }
+
           const whiteInCheck = isAnyKingInCheck(piecesState, 'white');
           const blackInCheck = isAnyKingInCheck(piecesState, 'black');
           if (whiteInCheck && blackInCheck) {
@@ -3203,15 +3302,36 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             setStatusMessage('Double-check');
             return;
           }
-          // determine if the side to move is in checkmate
+          // determine if the side to move is in checkmate or stalemate
           const sideToMove = currentTurn;
           const sideInCheck = isAnyKingInCheck(piecesState, sideToMove);
           const hasMove = hasAnyLegalMove(piecesState, sideToMove);
-          if (sideInCheck && !hasMove) {
+          if (!hasMove) {
             setGameOver(true);
-            const winner = sideToMove === 'white' ? 'black' : 'white';
-            setGameWinner(winner);
-            setStatusMessage(`Checkmate: ${winner} wins`);
+            if (sideInCheck) {
+              const winner = sideToMove === 'white' ? 'black' : 'white';
+              setGameWinner(winner);
+              setStatusMessage(`Checkmate: ${winner} wins`);
+            } else {
+              setGameWinner(null);
+              setStatusMessage('Draw: stalemate');
+            }
+            return;
+          }
+          // ── Threefold repetition ───────────────────────────────────────────────
+          // Auto-draw for AI games; 2-player games get a "Claim Draw" button instead
+          if (repetitionCount >= 3 && aiSide) {
+            setGameOver(true);
+            setGameWinner(null);
+            setStatusMessage('Draw: threefold repetition');
+            return;
+          }
+          // ── 50-move rule ──────────────────────────────────────────────────────
+          // Auto-draw for AI games; 2-player games get a "Declare Draw" button instead
+          if (halfMoveClock >= 100 && aiSide) {
+            setGameOver(true);
+            setGameWinner(null);
+            setStatusMessage('Draw: 50-move rule');
             return;
           }
           // normal check notification
@@ -3227,11 +3347,12 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           setGameOver(false);
           setGameWinner(null);
         } catch (e) {}
-      }, [piecesState, currentTurn]);
+      }, [piecesState, currentTurn, halfMoveClock, aiSide, hasSufficientMatingMaterial, repetitionCount]);
 
       // camera / controls persistence
       const controlsRef = useRef();
       const importInputRef = useRef(null);
+      const moveListRef = useRef(null); // for auto-scrolling the moves list to the latest entry
       // prefer explicit saved defaults if present; otherwise fall back to last-used camPos
       const [camPos, setCamPos] = useState(() => {
         try {
@@ -3553,10 +3674,25 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       };
 
       // auto-load server save if present
+      // Query-string override: ?autoplay[&strength=smart|smarter|dumb][&delay=1500]
+      // Starts an AI-vs-AI game immediately, skipping any server-saved state.
       const suppressAutoSaveRef = useRef(false);
       useEffect(() => {
         (async () => {
           try {
+            const params = new URLSearchParams(window.location.search);
+            if (params.has('autoplay')) {
+              // Apply optional overrides from query string
+              const qs = params.get('strength');
+              const qd = params.get('delay');
+              if (qs && ['smart','smarter','dumb'].includes(qs)) setAiStrength(qs);
+              if (qd && !isNaN(Number(qd))) setAiDelay(Number(qd));
+              // Start a fresh AI vs AI game — do NOT load from server
+              resetGame();
+              setAiSide('both');
+              setGameStarted(true);
+              return;
+            }
             const id = localStorage.getItem(SERVER_ID_KEY);
             if (id) {
               suppressAutoSaveRef.current = true;
@@ -3569,8 +3705,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       }, []);
 
       // autosave to server after moves/pieces change (debounced)
+      // Skipped entirely in AI-vs-AI mode to avoid hammering the server every move.
       useEffect(() => {
         if (suppressAutoSaveRef.current) return;
+        if (aiSide === 'both') return; // autoplay: no server saves
         const timer = setTimeout(() => {
           try { saveToServer(); } catch (e) { console.debug('autosave failed', e); }
         }, 500);
@@ -3690,7 +3828,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         
         if (!aiSide) return;
         if (gameOver) return;
-        if (currentTurn !== aiSide) return;
+        if (aiSide !== 'both' && currentTurn !== aiSide) return;
         
         // Get current move count (number of half-moves played)
         const currentMoveCount = (moveHistory || []).reduce((sum, entry) => {
@@ -3709,6 +3847,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           return;
         }
         
+        // Don't start next move if paused
+        if (aiPaused) return;
+
         // IMMEDIATELY mark this move count as being processed to preventrace conditions
         // This prevents multiple setTimeout instances from starting if useEffect fires rapidly
         aiLastMoveCountRef.current = currentMoveCount;
@@ -3721,16 +3862,20 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           aiTimeoutRef.current = { id: null, moveCount: null };
         }
         
-        const thinkDelay = 300 + Math.floor(Math.random() * 400);
+        // For AI vs AI: act as the side whose turn it is right now
+        const effectiveSide = aiSide === 'both' ? currentTurn : aiSide;
+        const thinkDelay = Math.max(150, aiDelayRef.current) + Math.floor(Math.random() * 200);
         const t = setTimeout(() => {
           (async () => {
             try {
               // Clear timeout ref when we start executing  (timeout has fired)
               aiTimeoutRef.current = { id: null, moveCount: null };
+              // Shadow outer aiSide so all existing logic below uses the correct acting side
+              const aiSide = effectiveSide; // eslint-disable-line no-shadow
 
               // ── Stockfish backend path ──────────────────────────────────────────
               let stockfishAttempted = false;
-              if (useStockfishRef.current && aiSide) {
+              if (aiStrengthRef.current !== 'dumb' && aiSide) {
                 try {
                   // Use raw coordinate move list (e.g. "2d82c6") — guaranteed parseable by C++ engine
                   // This avoids divergence from algebraic notation the engine may not fully understand
@@ -3749,10 +3894,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   const livePiecesForFen = prevPiecesRef.current || piecesState || [];
                   const fenStr = computeFen(livePiecesForFen, currentTurn, lastMove, (moveHistory || []).length);
                   console.log('Stockfish FEN:', fenStr);
-                  // Always hit the local backend for Stockfish (not the production CDN URL)
-                  const sfDepth = 8;
-                  const sfTimeMs = 5000;
-                  const sfUrl = 'http://localhost:5000/api/ai/bestmove';
+                  // Smart AI: depth 8 / 5s | Smarter AI: depth 14 / 12s
+                  const sfDepth = aiStrengthRef.current === 'smarter' ? 14 : 8;
+                  const sfTimeMs = aiStrengthRef.current === 'smarter' ? 12000 : 5000;
+                  const sfUrl = `${API_BASE_URL}/api/ai/bestmove`;
                   console.log('Calling Stockfish at', sfUrl, 'fen:', fenStr);
                   const sfResp = await fetch(sfUrl, {
                     method: 'POST',
@@ -3764,7 +3909,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   if (sfResp.ok) {
                     const sfResult = await sfResp.json();
                     stockfishAttempted = true; // Stockfish responded — do NOT fall back to JS AI
-                    console.log('Stockfish result:', sfResult);
+                    console.log('Stockfish result:', sfResult, 'searchDepth:', sfResult.searchDepth);
                     // Parse LfileRank notation (e.g. "1a4") → internal {x,y,z}
                     const parseQL = (s) => {
                       const m = s && s.match(/^([1-4])([a-h])([1-8])$/);
@@ -3807,8 +3952,57 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                         if (match) mover = livePieces.find(p => p.id === match.moverId);
                       }
                       if (mover) {
-                        applyMove(mover.id, toCoord);
-                        console.log('Stockfish move applied:', sfResult.raw, '→ piece', mover.t, mover.color, 'to', toCoord);
+                        // If the engine flagged this as a castling move, build
+                        // the castle metadata that applyMove needs to also move the rook.
+                        let enrichedTarget = toCoord;
+                        if (sfResult.isCastling && mover.t === 'K' && fromCoord) {
+                          try {
+                            const sx = fromCoord.x, sy = fromCoord.y, sz = fromCoord.z;
+                            const ky = toCoord.y, kz = toCoord.z;
+                            const dy = Math.abs(ky - sy), dz = Math.abs(kz - sz);
+                            // rookFromMap: keyed by Black convention (x=0); Y/Z same for both colours
+                            const rookFromMap = {
+                              '0,2,2->0,3,2': '0,3,3', '0,2,2->0,2,3': '0,3,3',
+                              '0,1,1->0,1,0': '0,0,0', '0,1,1->0,0,1': '0,0,0',
+                              '0,1,1->0,3,1': '0,3,0', '0,1,1->0,1,3': '0,0,3',
+                              '0,2,2->0,0,2': '0,0,3', '0,2,2->0,2,0': '0,3,0',
+                            };
+                            const mapKey = '0,' + sy + ',' + sz + '->0,' + ky + ',' + kz;
+                            const rookFromStr = rookFromMap[mapKey];
+                            if (rookFromStr) {
+                              const rfParts = rookFromStr.split(',').map(Number);
+                              const ry = rfParts[1], rz = rfParts[2], rx = sx;
+                              const rook = livePieces.find(p =>
+                                p.t === 'R' && p.color === aiSide && p.x === rx && p.y === ry && p.z === rz
+                              );
+                              if (rook) {
+                                const isQueenSide = (dy === 2 || dz === 2);
+                                const axis = dy > 0 ? 'y' : 'z';
+                                const rookTo = isQueenSide
+                                  ? (axis === 'y'
+                                    ? { x: sx, y: sy + Math.sign(ky - sy), z: sz }
+                                    : { x: sx, y: sy, z: sz + Math.sign(kz - sz) })
+                                  : { x: sx, y: sy, z: sz };
+                                enrichedTarget = { ...toCoord, castle: {
+                                  type: isQueenSide ? 'queen' : 'king',
+                                  rookId: rook.id,
+                                  rookFrom: { x: rx, y: ry, z: rz },
+                                  rookTo
+                                }};
+                                console.log('Stockfish: castling detected via engine flag', enrichedTarget.castle);
+                              } else {
+                                console.warn('Stockfish: castling flagged but rook not found at', {x: rx, y: ry, z: rz});
+                              }
+                            } else {
+                              console.warn('Stockfish: castling flagged but no rookFromMap entry for', mapKey);
+                            }
+                          } catch (e) {
+                            console.warn('Stockfish: castle metadata construction failed', e);
+                          }
+                        }
+                        if (aiPausedRef.current) { console.log('Stockfish: AI paused — suppressing move'); return; }
+                        applyMove(mover.id, enrichedTarget);
+                        console.log('Stockfish move applied:', sfResult.raw, '→ piece', mover.t, mover.color, 'to', enrichedTarget);
                         return; // done — skip JS negamax
                       }
                       console.warn('Stockfish: could not map move to piece, falling back to JS AI', sfResult, 'fromCoord:', fromCoord, 'toCoord:', toCoord);
@@ -4559,7 +4753,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     } catch (e) {}
                   }
                   if (bestCap && (bestSee >= 1 || ((piecesState || []).find(pp=>pp.x===bestCap.x && pp.y===bestCap.y && pp.z===bestCap.z && pp.color!==aiSide) || {}).t === 'R' || ((piecesState || []).find(pp=>pp.x===bestCap.x && pp.y===bestCap.y && pp.z===bestCap.z && pp.color!==aiSide) || {}).t === 'Q')) {
-                    try { applyMove(bestCap.moverId, { x: bestCap.x, y: bestCap.y, z: bestCap.z }); } catch (e) {}
+                    if (!aiPausedRef.current) { try { applyMove(bestCap.moverId, { x: bestCap.x, y: bestCap.y, z: bestCap.z }); } catch (e) {} }
                     return;
                   }
                 }
@@ -4795,12 +4989,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     } catch (e) {}
                   }
                 } catch (e) {}
-                // Only apply move if search wasn't cancelled
-                if (!searchStateRef.current.cancelled && best) {
+                // Only apply move if search wasn't cancelled and not paused
+                if (!searchStateRef.current.cancelled && !aiPausedRef.current && best) {
                   applyMove(best.moverId, { x: best.x, y: best.y, z: best.z });
-                  try { console.debug('AI applied move', best); } catch (e) {}
-                } else {
-                  try { console.debug('AI move cancelled or no best move found'); } catch (e) {}
+                  try { console.debug('AI applied move', best); } catch (e) {}  } else {
+                  try { console.debug('AI move cancelled, paused, or no best move found'); } catch (e) {}
                 }
               } catch (e) { try { console.debug('AI applyMove failed', e); } catch (ee) {} }
 
@@ -4832,7 +5025,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             }
           }
         };
-      }, [currentTurn, aiSide, useStockfish, piecesState, gameOver, moveHistory, getAllLegalMoves, simulateMove, negamax, applyMove, generateMoveNotation, orderMoves, isAnyKingInCheck, staticExchangeEval, attackersOfSquare, rebuildCoordMoveHistory]);
+      }, [currentTurn, aiSide, aiStrength, aiDelay, aiPaused, piecesState, gameOver, moveHistory, getAllLegalMoves, simulateMove, negamax, applyMove, generateMoveNotation, orderMoves, isAnyKingInCheck, staticExchangeEval, attackersOfSquare, rebuildCoordMoveHistory]);
 
       // keep OrbitControls enabled state in sync with pointer interaction/dragging
       useEffect(() => {
@@ -4911,14 +5104,18 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   <button className="menu-button" onClick={() => { resetGame(); setAiSide('black'); setGameStarted(true); setMobileMenuOpen(false); }}>
                     Play AI Black
                   </button>
+                  <button className="menu-button" onClick={() => { resetGame(); setAiSide('both'); setGameStarted(true); setMobileMenuOpen(false); }}>
+                    Play AI vs AI
+                  </button>
                   <hr />
                   <input ref={importInputRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => { if (e.target.files && e.target.files[0]) { importGame(e.target.files[0]); setGameStarted(true); } e.target.value = null; }} />
                   <button className="menu-button" onClick={() => { importInputRef.current && importInputRef.current.click(); setMobileMenuOpen(false); }}>Import Game</button>
                   <hr />
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer', marginTop: 4 }}>
                     AI: 
-                    <select value={useStockfish ? 'smart' : 'dumb'} onChange={e => setUseStockfish(e.target.value === 'smart')} style={{ fontSize: 12 }}>
+                    <select value={aiStrength} onChange={e => setAiStrength(e.target.value)} style={{ fontSize: 12 }}>
                       <option value="smart">Smart AI</option>
+                      <option value="smarter">Smarter AI</option>
                       <option value="dumb">Dumb AI</option>
                     </select>
                   </label>
@@ -4928,6 +5125,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 <button className="menu-button" onClick={() => { resetGame(); setAiSide(null); setGameStarted(false); setMobileMenuOpen(false); }}>
                   Start a new game
                 </button>
+              {aiSide && (
+                <div style={{ fontSize: 11, color: '#aaa', marginTop: 2, marginBottom: 2 }}>
+                  Mode: {aiSide === 'both' ? 'AI vs AI' : `You vs AI (${aiSide})`}
+                </div>
+              )}
               <hr />
               <button className="menu-button" onClick={() => { exportGame(); setMobileMenuOpen(false); }}>Export</button>
               <input ref={importInputRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => { if (e.target.files && e.target.files[0]) importGame(e.target.files[0]); e.target.value = null; }} />
@@ -4943,28 +5145,90 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               >
                 Take Back
               </button>
+              {/* Claim Draw (threefold repetition) — 2-player only, visible when same position has occurred 3 times */}
+              {!aiSide && repetitionCount >= 3 && !gameOver && (
+                <button
+                  className="menu-button"
+                  style={{ marginTop: 6, color: '#c8a000', fontWeight: 'bold' }}
+                  onClick={() => { setGameOver(true); setGameWinner(null); setStatusMessage('Draw: threefold repetition (claimed)'); setMobileMenuOpen(false); }}
+                >
+                  Claim Draw (repetition)
+                </button>
+              )}
+              {/* Declare Draw — 2-player only, visible when 50-move rule threshold reached */}
+              {!aiSide && halfMoveClock >= 100 && !gameOver && (
+                <button
+                  className="menu-button"
+                  style={{ marginTop: 6, color: '#c8a000', fontWeight: 'bold' }}
+                  onClick={() => { setGameOver(true); setGameWinner(null); setStatusMessage('Draw: 50-move rule (declared)'); setMobileMenuOpen(false); }}
+                >
+                  Declare Draw (50-move)
+                </button>
+              )}
               <hr />
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer', marginTop: 4 }}>
                 AI: 
-                <select value={useStockfish ? 'smart' : 'dumb'} onChange={e => setUseStockfish(e.target.value === 'smart')} style={{ fontSize: 12 }}>
+                <select value={aiStrength} onChange={e => setAiStrength(e.target.value)} style={{ fontSize: 12 }}>
                   <option value="smart">Smart AI</option>
+                  <option value="smarter">Smarter AI</option>
                   <option value="dumb">Dumb AI</option>
                 </select>
               </label>
+              {aiSide === 'both' && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, marginTop: 4 }}>
+                  Delay:&nbsp;
+                  <select value={aiDelay} onChange={e => setAiDelay(Number(e.target.value))} style={{ fontSize: 12 }}>
+                    <option value={500}>0.5s</option>
+                    <option value={1000}>1s</option>
+                    <option value={1500}>1.5s</option>
+                    <option value={3000}>3s</option>
+                    <option value={5000}>5s</option>
+                    <option value={10000}>10s</option>
+                  </select>
+                </label>
+              )}
+              {aiSide === 'both' && !gameOver && (
+                <button
+                  className="menu-button"
+                  style={{ marginTop: 6, fontWeight: 'bold', color: aiPaused ? '#4ade80' : '#f59e0b' }}
+                  onClick={() => {
+                    if (aiPaused) {
+                      // Resume: reset ref so AI re-triggers for the current position
+                      aiLastMoveCountRef.current = -1;
+                      setAiPaused(false);
+                    } else {
+                      // Pause: cancel any pending timeout
+                      if (aiTimeoutRef.current.id) {
+                        clearTimeout(aiTimeoutRef.current.id);
+                        aiTimeoutRef.current = { id: null, moveCount: null };
+                        // Reset ref so AI can replay this position when resumed
+                        aiLastMoveCountRef.current = -1;
+                      }
+                      setAiPaused(true);
+                    }
+                  }}
+                >
+                  {aiPaused ? '▶ Resume' : '⏸ Pause'}
+                </button>
+              )}
               </>
               )
             }
             </div>
-            {/* CHECK / CHECKMATE indicator */}
+            {/* CHECK / CHECKMATE / DRAW indicator */}
             {gameOver && statusMessage && statusMessage.toLowerCase().includes('checkmate') ? (
               <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECKMATE — Winner: {gameWinner ? (gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)) : 'Unknown'}</div>
+            ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('draw') ? (
+              <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>{statusMessage.toUpperCase()}</div>
+            ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('stalemate') ? (
+              <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>STALEMATE — Draw</div>
             ) : (statusMessage && statusMessage.toLowerCase().includes('check') ? (
               <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECK</div>
             ) : null)}
 
-            <div style={{ marginTop: '10px', width: isMobile ? '100%' : 'auto' }}>
-              <div style={{ fontWeight: 'bold', marginBottom: '6px' }}>Moves</div>
-              <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+            <div style={{ marginTop: '10px', width: isMobile ? '100%' : 'auto', ...(isMobile ? {} : { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }) }}>
+              <div style={{ fontWeight: 'bold', marginBottom: '6px', flexShrink: 0 }}>Moves</div>
+              <div ref={!isMobile ? moveListRef : null} style={{ fontFamily: 'monospace', fontSize: '13px', ...(isMobile ? {} : { overflowY: 'auto', flex: 1, minHeight: 0 }) }}>
                 {moveHistory.length === 0 ? <div style={{ color: '#888' }}>no moves</div> : (
                   <>
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -4974,9 +5238,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                           if (actualIdx < 0) return null;
                           return (
                             <tr key={`mh-${actualIdx}`}>
-                              <td style={{ width: '40px', paddingRight: '6px' }}>{actualIdx + 1}:</td>
-                              <td style={{ width: '50%', paddingRight: '6px' }}>{moveHistory[actualIdx].white || ''}</td>
-                              <td style={{ width: '50%' }}>{moveHistory[actualIdx].black || ''}</td>
+                              <td style={{ width: '34px', paddingRight: '4px' }}>{actualIdx + 1}:</td>
+                              <td style={{ width: '50%', paddingRight: '4px' }}>{moveHistory[actualIdx].white || ''}</td>
+                              <td>{moveHistory[actualIdx].black || ''}</td>
                             </tr>
                           );
                         })}

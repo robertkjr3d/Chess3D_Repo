@@ -7,6 +7,7 @@
 #define QUADLEVEL_BOARD_H_INCLUDED
 
 #include <array>
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -22,6 +23,8 @@ namespace QuadLevel {
 #if defined(_MSC_VER)
 #include <intrin.h>
 
+#if defined(_M_X64)
+// x64 MSVC — native 64-bit intrinsics
 inline int Bitboard128::popcount() const {
     return int(__popcnt64(lo)) + int(__popcnt64(hi));
 }
@@ -32,6 +35,22 @@ inline Square Bitboard128::lsb() const {
     if (hi) { _BitScanForward64(&idx, hi); return Square(idx + 64); }
     return SQ_NONE;
 }
+#else
+// x86 MSVC — split into 32-bit halves
+inline int Bitboard128::popcount() const {
+    return int(__popcnt(unsigned(lo))) + int(__popcnt(unsigned(lo >> 32)))
+         + int(__popcnt(unsigned(hi))) + int(__popcnt(unsigned(hi >> 32)));
+}
+
+inline Square Bitboard128::lsb() const {
+    unsigned long idx;
+    if (unsigned(lo))        { _BitScanForward(&idx, unsigned(lo));        return Square(idx); }
+    if (unsigned(lo >> 32))  { _BitScanForward(&idx, unsigned(lo >> 32));  return Square(idx + 32); }
+    if (unsigned(hi))        { _BitScanForward(&idx, unsigned(hi));        return Square(idx + 64); }
+    if (unsigned(hi >> 32))  { _BitScanForward(&idx, unsigned(hi >> 32));  return Square(idx + 96); }
+    return SQ_NONE;
+}
+#endif // _M_X64
 #else
 inline int Bitboard128::popcount() const {
     return __builtin_popcountll(lo) + __builtin_popcountll(hi);
@@ -482,6 +501,19 @@ inline std::vector<Move3D> Position3D::generate_pseudo_legal(Color us) const {
         Square from = kingSquares[us][ki];
         if (from == SQ_NONE) continue;
         Bitboard128 atk = king_attacks(from) & ~friends;
+
+        // Suppress normal king moves to king-side castle destinations
+        // when the matching rook is still on its starting square.
+        // Board-state check — immune to FEN castling-rights inaccuracy.
+        // Once the rook moves or is captured, the king moves freely.
+        const CastleEntry* ce = (us == WHITE) ? WhiteCastles : BlackCastles;
+        for (int ci = 0; ci < NUM_CASTLE_ENTRIES; ++ci) {
+            if (!ce[ci].is_queen_side
+                && ce[ci].king_from == from
+                && board[ce[ci].rook_from] == make_piece(us, ROOK))
+                atk.clear(ce[ci].king_to);
+        }
+
         while (atk.any())
             moves.emplace_back(from, atk.pop_lsb());
     }
@@ -536,6 +568,28 @@ inline std::vector<Move3D> Position3D::generate_legal_moves() const {
     legal.reserve(pseudo.size());
 
     for (const auto& m : pseudo) {
+        // Belt-and-suspenders: reject NORMAL king moves to king-side castle
+        // destinations when the matching rook is still on its starting square.
+        // Board-state check — immune to FEN castling-rights inaccuracy.
+        if (m.type_of() == NORMAL_3D) {
+            Piece pc = piece_on(m.from_sq());
+            if (pc != NO_PIECE && type_of(pc) == KING) {
+                const CastleEntry* ce = (sideToMove == WHITE) ? WhiteCastles : BlackCastles;
+                bool suppress = false;
+                for (int ci = 0; ci < NUM_CASTLE_ENTRIES; ++ci) {
+                    if (!ce[ci].is_queen_side
+                        && ce[ci].king_from == m.from_sq()
+                        && ce[ci].king_to   == m.to_sq()
+                        && piece_on(ce[ci].rook_from) == make_piece(sideToMove, ROOK)) {
+                        suppress = true;
+                        break;
+                    }
+                }
+                if (suppress)
+                    continue;
+            }
+        }
+
         // Make move on a copy and test legality
         Position3D tmp = *this;
         tmp.do_move(m);

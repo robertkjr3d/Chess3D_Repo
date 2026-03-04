@@ -4,6 +4,7 @@
 #include "quadlevel_board.h"
 #include "quadlevel_search.h"
 
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <string>
@@ -13,6 +14,7 @@ using namespace QuadLevel;
 struct QLContext {
     Position3D pos;
     Search3D   search;
+    int        lastSearchDepth = 0;
 };
 
 static QLContext* ctx_of(void* p) { return static_cast<QLContext*>(p); }
@@ -25,7 +27,12 @@ static const char* to_c_str(const std::string& s) {
 
 extern "C" {
 
+STOCKFISH_API const char* ql_version(void) {
+    return "castle-fix-v4-verified-2026-03-03T10";
+}
+
 STOCKFISH_API void* ql_create(void) {
+    std::fprintf(stderr, "[DLL-VERSION] %s\n", ql_version());
     auto* c = new QLContext();
     c->pos.set_startpos();
     return static_cast<void*>(c);
@@ -37,7 +44,11 @@ STOCKFISH_API void ql_destroy(void* ctx) {
 
 STOCKFISH_API void ql_set_startpos(void* ctx) {
     ctx_of(ctx)->pos.set_startpos();
-    ctx_of(ctx)->search.clear();
+    ctx_of(ctx)->search.new_game();
+}
+
+STOCKFISH_API void ql_new_game(void* ctx) {
+    ctx_of(ctx)->search.new_game();
 }
 
 STOCKFISH_API const char* ql_get_display(void* ctx) {
@@ -53,8 +64,13 @@ STOCKFISH_API int ql_set_fen(void* ctx, const char* fen) {
         return 0;
     auto* c = ctx_of(ctx);
     bool ok = c->pos.set_fen(fen);
-    if (ok)
-        c->search.clear();
+    if (ok) {
+        std::fprintf(stderr, "[SET-FEN] castlingRights=0x%x  fen=%s\n",
+                     c->pos.castling_rights(), fen);
+        c->search.clear();  // clear search tables only, preserve game history
+        // Push this position into game history for repetition detection
+        c->search.push_game_position(Zobrist3D::compute_hash(c->pos));
+    }
     return ok ? 1 : 0;
 }
 
@@ -79,6 +95,8 @@ STOCKFISH_API int ql_make_move(void* ctx, const char* move_str) {
         return 0;
 
     c->pos.do_move(matched);
+    // Push new position hash for repetition detection
+    c->search.push_game_position(Zobrist3D::compute_hash(c->pos));
     return 1;
 }
 
@@ -138,9 +156,19 @@ STOCKFISH_API const char* ql_best_move(void* ctx, int depth, int time_ms) {
     if (depth > 64) depth = 64;
 
     auto result = c->search.search(c->pos, depth, time_ms);
+    c->lastSearchDepth = result.depth;
 
     if (!result.best_move.is_ok())
         return to_c_str("0000");
+
+    // Diagnostic: log when the chosen best-move is a castling move
+    if (result.best_move.type_of() == CASTLING_3D) {
+        std::fprintf(stderr,
+            "[CASTLE-BESTMOVE] chosen=%s  castlingRights=0x%x\n",
+            move_to_string(result.best_move).c_str(),
+            c->pos.castling_rights());
+    }
+
     return to_c_str(move_to_string(result.best_move));
 }
 
@@ -168,6 +196,10 @@ STOCKFISH_API void ql_set_tt_size(void* ctx, int size_mb) {
 
 STOCKFISH_API void ql_free_string(const char* str) {
     delete[] str;
+}
+
+STOCKFISH_API int ql_last_search_depth(void* ctx) {
+    return ctx_of(ctx)->lastSearchDepth;
 }
 
 }  // extern "C"
