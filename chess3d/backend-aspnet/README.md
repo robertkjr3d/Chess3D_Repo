@@ -12,7 +12,7 @@
    Edit `appsettings.json` with your local MySQL credentials:
    ```json
    "ConnectionStrings": {
-     "DefaultConnection": "Server=localhost;Database=chess3d;User=root;Password=Kangbote1984$$;"
+     "DefaultConnection": "hidden"
    }
    ```
 
