@@ -561,6 +561,8 @@ inline std::string move_to_string(Move3D m) {
     if (m.type_of() == PROMOTION_3D) {
         constexpr char promo[] = " nbrq";
         s += promo[m.promotion_type()];
+    } else if (m.type_of() == CASTLING_3D) {
+        s += 'C';
     }
     return s;
 }

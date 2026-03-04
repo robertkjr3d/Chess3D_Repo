@@ -166,7 +166,8 @@ constexpr Square flip_rank(Square s) {
 //    7. Pawn shield for kings
 //    8. Level dominance (3D-specific: multi-level presence)
 //    9. King tropism (attacker proximity to enemy kings)
-//   10. Tempo bonus
+//   10. Castling incentive
+//   11. Tempo bonus
 //
 //  All values in centipawns.  Positive = White advantage.
 // ?????????????????????????????????????????????
@@ -183,7 +184,7 @@ constexpr Value PASSED_PAWN_BASE   = 15;   // + rank bonus
 constexpr Value DOUBLED_PAWN       = -12;
 constexpr Value ISOLATED_PAWN      = -15;
 constexpr Value CONNECTED_PAWN     = 8;
-constexpr Value PAWN_SHIELD_BONUS  = 10;   // per shield pawn
+constexpr Value PAWN_SHIELD_BONUS  = 10;   // per shield pawning
 constexpr Value KING_ATTACK_WEIGHT = 10;
 constexpr Value KING_TROPISM_WEIGHT= 2;    // per distance-unit closer
 constexpr Value LEVEL_SPREAD_BONUS = 8;    // per extra level occupied by pieces
@@ -191,7 +192,10 @@ constexpr Value TEMPO_BONUS        = 14;
 constexpr Value PAWN_THREAT_QUEEN  = 60;   // queen on square attacked by enemy pawn
 constexpr Value PAWN_THREAT_ROOK   = 25;   // rook on square attacked by enemy pawn
 constexpr Value PAWN_THREAT_MINOR  = 15;   // bishop/knight attacked by enemy pawn
-constexpr Value EARLY_QUEEN_PENALTY= 40;   // queen developed too early (first 8 moves)
+constexpr Value EARLY_QUEEN_PENALTY= 80;   // queen developed too early (first 8 moves), per rank
+constexpr Value EARLY_QUEEN_BASE   = 50;   // flat penalty for any queen off home rank in opening
+constexpr Value CASTLED_KING_BONUS = 60;   // king sitting on a castling destination square
+constexpr Value CASTLING_RIGHTS_BONUS = 3; // per available castling right (preserves options)
 
 // Game phase — used for tapered eval
 constexpr int PHASE_TOTAL = 4 * KnightValue3D + 4 * BishopValue3D
@@ -550,18 +554,24 @@ inline Value evaluate(const Position3D& pos) {
     }
 
     // ??? 9. Early Queen development penalty ???
-    //   Discourage moving Queens past rank 3 (White) or rank 6 (Black)
-    //   in the first ~8 full moves (16 plies).  Applies only in MG.
+    //   Discourage moving Queens off home rank at all (flat base penalty)
+    //   and past rank 2 (White) or rank 7 (Black) even more (per-rank).
+    //   Active only in the first ~8 full moves (16 plies).  MG only.
     if (pos.game_ply() < 16) {
         for (int c = 0; c < COLOR_NB; ++c) {
             Color col  = Color(c);
             int   sign = (col == WHITE) ? 1 : -1;
-            Rank  limit = (col == WHITE) ? RANK_3 : RANK_6;
+            Rank  home  = (col == WHITE) ? RANK_1 : RANK_8;
+            Rank  limit = (col == WHITE) ? RANK_2 : RANK_7;
 
             Bitboard128 q = pos.pieces(col, QUEEN);
             while (q.any()) {
                 Square s = q.pop_lsb();
                 Rank r = rank_of(s);
+                // Flat penalty for any queen not on its home rank
+                if (r != home)
+                    mg_score -= sign * EARLY_QUEEN_BASE;
+                // Additional per-rank penalty for queen pushed past the limit
                 bool too_far = (col == WHITE) ? (r > limit) : (r < limit);
                 if (too_far) {
                     int dist = (col == WHITE) ? (int(r) - int(limit))
@@ -572,7 +582,37 @@ inline Value evaluate(const Position3D& pos) {
         }
     }
 
-    // ??? 10. Tempo ???
+    // ??? 10. Castling incentive ???
+    //   Bonus for kings on castling-destination squares (likely castled).
+    //   Small bonus per available castling right (preserves the option).
+    for (int c = 0; c < COLOR_NB; ++c) {
+        Color col = Color(c);
+        int sign = (col == WHITE) ? 1 : -1;
+        const CastleEntry* entries = (col == WHITE) ? WhiteCastles : BlackCastles;
+
+        // Check if any king sits on a castling destination square
+        for (int ki = 0; ki < pos.king_count(col); ++ki) {
+            Square ksq = pos.king_square(col, ki);
+            if (ksq == SQ_NONE) continue;
+            for (int i = 0; i < NUM_CASTLE_ENTRIES; ++i) {
+                if (ksq == entries[i].king_to) {
+                    mg_score += sign * CASTLED_KING_BONUS;
+                    eg_score += sign * (CASTLED_KING_BONUS / 2);
+                    break;
+                }
+            }
+        }
+
+        // Small bonus per remaining castling right
+        int offset = int(col) * NUM_CASTLE_ENTRIES;
+        int rights = pos.castling_rights();
+        for (int i = 0; i < NUM_CASTLE_ENTRIES; ++i) {
+            if (rights & (1 << (offset + i)))
+                mg_score += sign * CASTLING_RIGHTS_BONUS;
+        }
+    }
+
+    // ??? 11. Tempo ???
     mg_score += (us == WHITE) ? TEMPO_BONUS : -TEMPO_BONUS;
 
     // ??? Tapered eval: interpolate between MG and EG ???
@@ -758,14 +798,32 @@ using InfoCallback = std::function<void(const SearchResult&)>;
 
 class Search3D {
    public:
-    Search3D() { clear(); }
+    Search3D() { new_game(); }
 
+    // Clear search tables only (TT, history heuristic, killers)
+    // Preserves game history for repetition detection
     void clear() {
         tt.clear();
         std::memset(history, 0, sizeof(history));
         std::memset(killers, 0, sizeof(killers));
         nodes_searched = 0;
         stop_flag = false;
+    }
+
+    // Full reset — clears everything including game position history
+    void new_game() {
+        clear();
+        gameHistory.clear();
+    }
+
+    // Push current position hash into game history (call after each real move)
+    void push_game_position(uint64_t hash) {
+        gameHistory.push_back(hash);
+    }
+
+    // Clear game history (e.g. when starting a new game)
+    void clear_game_history() {
+        gameHistory.clear();
     }
 
     void set_tt_size(size_t mb) { tt.resize(mb); }
@@ -837,6 +895,37 @@ class Search3D {
     bool       stop_flag;
     int        time_limit;
     std::chrono::steady_clock::time_point start_time;
+
+    // Game position history — hashes of all positions reached via real moves
+    std::vector<uint64_t> gameHistory;
+    // Search stack — hashes of positions within the current search tree
+    uint64_t searchStack[MAX_PLY_3D + 1];
+
+    // Material-aware repetition value:
+    //   If we have a material advantage  ? penalise the draw (avoid it)
+    //   If we are behind with no prospects ? welcome the draw
+    //   If roughly equal                  ? slight penalty
+    Value repetition_value(const Position3D& pos) const {
+        Color us = pos.side_to_move();
+        Value our_mat = VALUE_ZERO, their_mat = VALUE_ZERO;
+        for (int sq = 0; sq < SQUARE_NB; ++sq) {
+            Piece pc = pos.piece_on(Square(sq));
+            if (pc == NO_PIECE || type_of(pc) == KING) continue;
+            if (color_of(pc) == us)
+                our_mat += PieceValue3D[pc];
+            else
+                their_mat += PieceValue3D[pc];
+        }
+        Value advantage = our_mat - their_mat;
+        // Well ahead: penalise draw proportionally (avoid repetition)
+        if (advantage > PawnValue3D)
+            return Value(-advantage / 2);
+        // Well behind: welcome the draw
+        if (advantage < -PawnValue3D)
+            return VALUE_ZERO;
+        // Roughly equal: mild penalty to discourage lazy draws
+        return Value(-PawnValue3D / 4);
+    }
 
     // --- Opening book ---
     // White move 1: random from 4 central pawn double-pushes
@@ -934,6 +1023,55 @@ class Search3D {
             }
         }
 
+        // Black's second move (ply 3): deeper book lines
+        // All 4 combinations of pawn pair + knight ? same random pawn response
+        //   Pawn pair A: 1. 2b4 2b5  (W pawn sq3(3,1,1), B pawn sq3(4,1,1))
+        //   Pawn pair B: 1. 3c4 3c5  (W pawn sq3(3,2,2), B pawn sq3(4,2,2))
+        //   Knight A:    2. N2c3     (W knight sq3(2,2,1))
+        //   Knight B:    2. N3b3     (W knight sq3(2,1,2))
+        // Response: randomly pawn to 2c6 or 3b6
+        if (ply == 3 && us == BLACK) {
+            // Detect either pawn pair
+            auto is_wpawn = [&](Square s) {
+                Piece p = pos.piece_on(s);
+                return p != NO_PIECE && color_of(p) == WHITE && type_of(p) == PAWN;
+            };
+            auto is_bpawn = [&](Square s) {
+                Piece p = pos.piece_on(s);
+                return p != NO_PIECE && color_of(p) == BLACK && type_of(p) == PAWN;
+            };
+            auto is_wknight = [&](Square s) {
+                Piece p = pos.piece_on(s);
+                return p != NO_PIECE && color_of(p) == WHITE && type_of(p) == KNIGHT;
+            };
+
+            bool pawnPairA = is_wpawn(sq3(3, 1, 1)) && is_bpawn(sq3(4, 1, 1));  // 2b4/2b5
+            bool pawnPairB = is_wpawn(sq3(3, 2, 2)) && is_bpawn(sq3(4, 2, 2));  // 3c4/3c5
+            bool knightA   = is_wknight(sq3(2, 2, 1));  // N2c3
+            bool knightB   = is_wknight(sq3(2, 1, 2));  // N3b3
+
+            if ((pawnPairA || pawnPairB) && (knightA || knightB)) {
+                struct BookReply { Square from; Square to; };
+                const BookReply replies[2] = {
+                    { sq3(6, 2, 1), sq3(5, 2, 1) },  // 2c7?2c6
+                    { sq3(6, 1, 2), sq3(5, 1, 2) },  // 3b7?3b6
+                };
+                auto seed = static_cast<unsigned>(
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+                std::mt19937 rng(seed);
+                int idx = std::uniform_int_distribution<int>(0, 1)(rng);
+                auto legal = pos.generate_legal_moves();
+                // Try chosen reply first, then fallback to the other
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    int pick = (idx + attempt) % 2;
+                    for (const auto& lm : legal) {
+                        if (lm.from_sq() == replies[pick].from && lm.to_sq() == replies[pick].to)
+                            return lm;
+                    }
+                }
+            }
+        }
+
         return Move3D::none();  // Not in opening book
     }
 
@@ -1023,6 +1161,25 @@ class Search3D {
 
         // --- Transposition table probe ---
         uint64_t hash = Zobrist3D::compute_hash(pos);
+
+        // --- Repetition detection ---
+        // Record this position on the search stack
+        searchStack[ply] = hash;
+        if (ply > 0) {
+            int rep_count = 0;
+            // Check against game history (real moves played)
+            for (const auto& gh : gameHistory) {
+                if (gh == hash) rep_count++;
+            }
+            // Check against search stack (positions within this search)
+            // Only same-colour positions (every 2 plies)
+            for (int i = ply - 2; i >= 0; i -= 2) {
+                if (searchStack[i] == hash) rep_count++;
+            }
+            // One prior occurrence = 2-fold; treat as impending 3-fold
+            if (rep_count >= 1)
+                return repetition_value(pos);
+        }
         Move3D tt_move = Move3D::none();
         TTEntry* tte = tt.probe(hash);
         if (tte) {

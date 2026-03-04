@@ -233,7 +233,13 @@
     <ClInclude Include="..\..\stockfish-src\quadlevel_board.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\stockfish-src\quadlevel_search.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\stockfish-src\quadlevel_types.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\stockfish-src\stockfish_api.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
