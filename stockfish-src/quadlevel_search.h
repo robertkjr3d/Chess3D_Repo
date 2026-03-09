@@ -117,7 +117,7 @@ constexpr int PST_QUEEN[SQUARE_NB] = {
       0,  5,  5,  0,   -5,  0,  5, -5,   -5,  0,  0, -5,  -10, -5, -5,-10,
 };
 
-// King: stay on back rank early, avoid center
+// King: stay on back rank early, avoid center (MIDDLEGAME)
 constexpr int PST_KING[SQUARE_NB] = {
     // Level 1
      20, 20, 10, 20,   10,  0,  0, 10,  -10,-10,-20,-10,  -20,-20,-30,-20,
@@ -133,6 +133,22 @@ constexpr int PST_KING[SQUARE_NB] = {
     -30,-30,-40,-30,  -40,-40,-50,-40,  -50,-50,-60,-50,  -60,-60,-70,-60,
 };
 
+// King ENDGAME: centralise — active king is critical for mating
+constexpr int PST_KING_EG[SQUARE_NB] = {
+    // Level 1  (edge level — less ideal)
+    -30,-20,-20,-30,  -15, -5, -5,-15,   -5,  5,  5, -5,    0, 10, 10,  0,
+      0, 10, 10,  0,   -5,  5,  5, -5,  -15, -5, -5,-15,  -30,-20,-20,-30,
+    // Level 2  (inner level — good)
+    -15, -5, -5,-15,    0, 10, 10,  0,   10, 20, 20, 10,   15, 25, 25, 15,
+     15, 25, 25, 15,   10, 20, 20, 10,    0, 10, 10,  0,  -15, -5, -5,-15,
+    // Level 3  (inner level — good)
+    -15, -5, -5,-15,    0, 10, 10,  0,   10, 20, 20, 10,   15, 25, 25, 15,
+     15, 25, 25, 15,   10, 20, 20, 10,    0, 10, 10,  0,  -15, -5, -5,-15,
+    // Level 4  (edge level — less ideal)
+    -30,-20,-20,-30,  -15, -5, -5,-15,   -5,  5,  5, -5,    0, 10, 10,  0,
+      0, 10, 10,  0,   -5,  5,  5, -5,  -15, -5, -5,-15,  -30,-20,-20,-30,
+};
+
 inline int pst_value(PieceType pt, Square s) {
     switch (pt) {
         case PAWN:   return PST_PAWN[s];
@@ -143,6 +159,11 @@ inline int pst_value(PieceType pt, Square s) {
         case KING:   return PST_KING[s];
         default:     return 0;
     }
+}
+
+inline int pst_value_eg(PieceType pt, Square s) {
+    if (pt == KING) return PST_KING_EG[s];
+    return pst_value(pt, s);
 }
 
 // Mirror a square for Black's PST lookup (flip rank: r ? 7-r)
@@ -195,7 +216,12 @@ constexpr Value PAWN_THREAT_MINOR  = 15;   // bishop/knight attacked by enemy pa
 constexpr Value EARLY_QUEEN_PENALTY= 80;   // queen developed too early (first 8 moves), per rank
 constexpr Value EARLY_QUEEN_BASE   = 50;   // flat penalty for any queen off home rank in opening
 constexpr Value CASTLED_KING_BONUS = 60;   // king sitting on a castling destination square
-constexpr Value CASTLING_RIGHTS_BONUS = 3; // per available castling right (preserves options)
+constexpr Value CASTLING_RIGHTS_BONUS = 10; // per available castling right (preserves options)
+
+// --- Two-king endgame weights ---
+constexpr Value KING_DOUBLE_CHECK_BONUS = 80;  // piece can CHECK both enemy kings (devastating fork)
+constexpr Value KING_NEAR_FORK_BONUS   = 15;  // piece checks one king & reaches zone of other
+constexpr Value KING_SEPARATION_PEN    = 6;   // per manhattan-distance unit between friendly kings
 
 // Game phase — used for tapered eval
 constexpr int PHASE_TOTAL = 4 * KnightValue3D + 4 * BishopValue3D
@@ -229,9 +255,10 @@ inline Value evaluate(const Position3D& pos) {
 
         // PST (flip for Black)
         Square pst_sq = (c == WHITE) ? Square(sq) : flip_rank(Square(sq));
-        int pst = pst_value(pt, pst_sq);
-        mg_score += sign * pst;
-        eg_score += sign * (pst * 3 / 4);  // EG: PST slightly dampened
+        int pst_mg = pst_value(pt, pst_sq);
+        int pst_eg = pst_value_eg(pt, pst_sq);
+        mg_score += sign * pst_mg;
+        eg_score += sign * (pt == KING ? pst_eg : pst_eg * 3 / 4);
 
         // Accumulate phase (non-pawn, non-king material)
         if (pt != PAWN && pt != KING)
@@ -615,6 +642,164 @@ inline Value evaluate(const Position3D& pos) {
     // ??? 11. Tempo ???
     mg_score += (us == WHITE) ? TEMPO_BONUS : -TEMPO_BONUS;
 
+    // ??? 12. Mating drive (endgame) — two-king aware ???
+    //   With two kings per side:
+    //   - King-forking (piece attacking zones of BOTH enemy kings) is rewarded
+    //   - Enemy kings far apart = harder to defend both = bonus for attacker
+    //   - Mating drive activates at lower threshold (knight can fork both kings)
+    //   - Enemy king pushed toward edges + our king proximity still applies
+    {
+        Bitboard128 occ_md = pos.pieces();  // occupancy for sliding attacks
+
+        for (int c = 0; c < COLOR_NB; ++c) {
+            Color col   = Color(c);
+            Color enemy  = ~col;
+            int   sign   = (col == WHITE) ? 1 : -1;
+
+            // Sum non-pawn, non-king material for each side
+            Value our_mat = 0, their_mat = 0;
+            for (int sq = 0; sq < SQUARE_NB; ++sq) {
+                Piece pc = pos.piece_on(Square(sq));
+                if (pc == NO_PIECE) continue;
+                PieceType pt = type_of(pc);
+                if (pt == PAWN || pt == KING) continue;
+                if (color_of(pc) == col)
+                    our_mat += PieceValue3D[pc];
+                else
+                    their_mat += PieceValue3D[pc];
+            }
+
+            // --- 12a. King-fork detection (always active, not just when ahead) ---
+            //   Two tiers:
+            //   - Double-check: piece can CHECK both king squares (genuine fork)
+            //   - Near-fork:    piece can CHECK one king and reach zone of other
+            //   Zone-zone overlap is deliberately excluded (too noisy, causes
+            //   passive king shuffles at shallow depth).
+            if (pos.king_count(enemy) == 2) {
+                Square ek0 = pos.king_square(enemy, 0);
+                Square ek1 = pos.king_square(enemy, 1);
+                if (ek0 != SQ_NONE && ek1 != SQ_NONE) {
+                    Bitboard128 ek0_bb = Bitboard128::from_square(ek0);
+                    Bitboard128 ek1_bb = Bitboard128::from_square(ek1);
+                    Bitboard128 kz0 = pos.king_attacks(ek0); kz0.set(ek0);
+                    Bitboard128 kz1 = pos.king_attacks(ek1); kz1.set(ek1);
+
+                    // Check each of our non-king, non-pawn pieces
+                    for (int sq = 0; sq < SQUARE_NB; ++sq) {
+                        Piece pc = pos.piece_on(Square(sq));
+                        if (pc == NO_PIECE || color_of(pc) != col) continue;
+                        PieceType pt = type_of(pc);
+                        if (pt == PAWN || pt == KING) continue;
+
+                        Bitboard128 atk = BB_ZERO;
+                        switch (pt) {
+                            case KNIGHT: atk = pos.knight_attacks(Square(sq)); break;
+                            case BISHOP: atk = pos.bishop_attacks(Square(sq), occ_md); break;
+                            case ROOK:   atk = pos.rook_attacks(Square(sq), occ_md); break;
+                            case QUEEN:  atk = pos.queen_attacks(Square(sq), occ_md); break;
+                            default: break;
+                        }
+
+                        // Precise: can the piece give CHECK to the king squares?
+                        bool checks_k0 = (atk & ek0_bb).any();
+                        bool checks_k1 = (atk & ek1_bb).any();
+
+                        if (checks_k0 && checks_k1) {
+                            // Double-check fork: devastating, often unescapable
+                            mg_score += sign * KING_DOUBLE_CHECK_BONUS;
+                            eg_score += sign * KING_DOUBLE_CHECK_BONUS * 3 / 2;
+                        } else if (checks_k0 && (atk & kz1).any()) {
+                            // Checks king 0, threatens zone of king 1
+                            mg_score += sign * KING_NEAR_FORK_BONUS;
+                            eg_score += sign * KING_NEAR_FORK_BONUS * 3 / 2;
+                        } else if (checks_k1 && (atk & kz0).any()) {
+                            // Checks king 1, threatens zone of king 0
+                            mg_score += sign * KING_NEAR_FORK_BONUS;
+                            eg_score += sign * KING_NEAR_FORK_BONUS * 3 / 2;
+                        }
+                    }
+
+                    // --- 12b. Enemy king separation penalty ---
+                    //   Enemy kings far apart are harder to defend simultaneously.
+                    //   Bonus for the attacker (penalty applied to the defending side).
+                    int ek_sep = manhattan_3d(ek0, ek1);
+                    // Separation > 4 starts to become exploitable
+                    if (ek_sep > 4) {
+                        int sep_bonus = (ek_sep - 4) * KING_SEPARATION_PEN;
+                        mg_score += sign * sep_bonus / 2;
+                        eg_score += sign * sep_bonus;
+                    }
+                }
+            }
+
+            // --- 12c. Friendly king separation penalty ---
+            //   Our OWN kings too far apart can't support each other for defense.
+            if (pos.king_count(col) == 2) {
+                Square ok0 = pos.king_square(col, 0);
+                Square ok1 = pos.king_square(col, 1);
+                if (ok0 != SQ_NONE && ok1 != SQ_NONE) {
+                    int ok_sep = manhattan_3d(ok0, ok1);
+                    if (ok_sep > 5) {
+                        int sep_pen = (ok_sep - 5) * KING_SEPARATION_PEN;
+                        mg_score -= sign * sep_pen / 3;
+                        eg_score -= sign * sep_pen / 2;
+                    }
+                }
+            }
+
+            // --- 12d. Mating drive (edge-pushing + proximity) ---
+            //   Lower threshold with two kings: a knight advantage can fork both.
+            Value mat_edge = our_mat - their_mat;
+            Value drive_threshold = (pos.king_count(enemy) == 2)
+                                  ? KnightValue3D   // ~285 — knight can fork both kings
+                                  : RookValue3D;     // ~400 — standard single-king threshold
+            if (mat_edge >= drive_threshold) {
+                int drive = 0;
+
+                // Penalise enemy king centrality (reward pushing to edges)
+                for (int ki = 0; ki < pos.king_count(enemy); ++ki) {
+                    Square ek = pos.king_square(enemy, ki);
+                    if (ek == SQ_NONE) continue;
+                    Coord ec = decompose(ek);
+                    int file_center = std::max(1 - ec.file, ec.file - 2);
+                    int rank_center = std::max(3 - ec.rank, ec.rank - 4);
+                    int level_center = std::max(1 - ec.level, ec.level - 2);
+                    int edge_dist = file_center + rank_center + level_center;
+                    drive += edge_dist * 10;
+
+                    // Reward our king being close to enemy king
+                    for (int oki = 0; oki < pos.king_count(col); ++oki) {
+                        Square ok = pos.king_square(col, oki);
+                        if (ok == SQ_NONE) continue;
+                        int proximity = 14 - manhattan_3d(ok, ek);
+                        if (proximity > 0)
+                            drive += proximity * 4;
+                    }
+                }
+
+                // Two-king bonus: if both enemy kings are on edges, extra reward
+                if (pos.king_count(enemy) == 2) {
+                    Square ek0 = pos.king_square(enemy, 0);
+                    Square ek1 = pos.king_square(enemy, 1);
+                    if (ek0 != SQ_NONE && ek1 != SQ_NONE) {
+                        Coord ec0 = decompose(ek0), ec1 = decompose(ek1);
+                        bool k0_edge = (ec0.file == 0 || ec0.file == NUM_FILES-1 ||
+                                        ec0.rank == 0 || ec0.rank == NUM_RANKS-1 ||
+                                        ec0.level == 0 || ec0.level == NUM_LEVELS-1);
+                        bool k1_edge = (ec1.file == 0 || ec1.file == NUM_FILES-1 ||
+                                        ec1.rank == 0 || ec1.rank == NUM_RANKS-1 ||
+                                        ec1.level == 0 || ec1.level == NUM_LEVELS-1);
+                        if (k0_edge && k1_edge)
+                            drive += 30;  // both kings cornered — mating net closing
+                    }
+                }
+
+                int scale = std::min(int(mat_edge) / 100, 6);
+                eg_score += sign * drive * scale / 3;
+            }
+        }
+    }
+
     // ??? Tapered eval: interpolate between MG and EG ???
     // phase = total non-pawn/king material still on board
     if (phase > PHASE_TOTAL) phase = PHASE_TOTAL;
@@ -917,11 +1102,17 @@ class Search3D {
                 their_mat += PieceValue3D[pc];
         }
         Value advantage = our_mat - their_mat;
+
+        // Two-king factor: with 2 kings, even a minor-piece edge is
+        // dangerous (king-fork potential), so penalise draws more.
+        bool two_kings = (pos.king_count(WHITE) == 2 && pos.king_count(BLACK) == 2);
+        Value threshold = two_kings ? Value(PawnValue3D / 2) : PawnValue3D;
+
         // Well ahead: penalise draw proportionally (avoid repetition)
-        if (advantage > PawnValue3D)
-            return Value(-advantage / 2);
+        if (advantage > threshold)
+            return Value(-advantage / (two_kings ? 1 : 2));  // stronger penalty with 2 kings
         // Well behind: welcome the draw
-        if (advantage < -PawnValue3D)
+        if (advantage < -threshold)
             return VALUE_ZERO;
         // Roughly equal: mild penalty to discourage lazy draws
         return Value(-PawnValue3D / 4);

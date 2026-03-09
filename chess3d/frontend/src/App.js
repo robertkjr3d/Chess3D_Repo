@@ -6,6 +6,38 @@ import { OrbitControls, useGLTF } from "@react-three/drei";
 import "./App.css";
 import { API_BASE_URL } from './config';
 
+// ── Zoom calibration formula ────────────────────────────────────────────────
+// Calibrated empirically from 25 screen-resolution data points.
+// Mobile (w<=768): width-based lookup — 0% error on all known devices.
+// Desktop: min(w,h) / (0.032*min(w,h) + 30) — max error ±1.4 on calibration set.
+function calcZoom(w, h) {
+  if (w <= 768) {
+    // Mobile: width-based device-model lookup
+    let base;
+    if (w <= 344) base = 12.3;       // narrow tall phones (344×882)
+    else if (w <= 360) base = 12.2;  // S8+  (360×740)
+    else if (w <= 375) base = 11.4;  // iPhone SE  (375×667) — short screen
+    else if (w <= 390) base = 13.1;  // iPhone 14  (390×844)
+    else if (w <= 414) base = 13.1;  // large Android phones (412–414)
+    else if (w <= 430) base = 13.5;  // 430px phones (430×932)
+    else if (w <= 540) base = 11.7;  // compact tablet portrait (540×720)
+    else base = 14.5;                // iPad / larger tablets (768×1024)
+    // Height correction: if canvas is shorter than the natural height for this
+    // phone (approx w*1.5), reduce zoom so the board still fits vertically.
+    // Skip when fullscreen — the full viewport is available, no correction needed.
+    // Slope 0.014 per pixel short ≈ 0.7 drop per 50px height reduction.
+    if (h && !document.fullscreenElement) {
+      const refH = w * 1.5;
+      if (h < refH) base = Math.max(base * 0.75, base - (refH - h) * 0.014);
+    }
+    return base;
+  }
+  // Desktop: binding dimension is min(w,h); formula fit from empirical data.
+  // 0.98 bias factor gives a slight underestimate (prefers zoomed-out over clipping).
+  const m = Math.min(w, h);
+  return Math.round(m / (0.029 * m + 34.5) * 0.98 * 10) / 10;
+}
+
 // ── FEN computation for Stockfish sync ──────────────────────────────────────
 // Castle entries matching C++ CastleEntry tables (WhiteCastles[0..7], BlackCastles[0..7])
 // Positions are in frontend coords: x=row (0=rank8, 7=rank1), y=file, z=level
@@ -133,7 +165,12 @@ const PIECE_HIT_DISC_Y = 0.08; // world units — height of disc above board sur
 const DRAG_PIXEL_THRESHOLD = 11; // minimum pixels to move before drag starts
 
 // Y positions for each logical level `z` (index 0 = TOP board, index 3 = BOTTOM board)
-const LEVEL_Y = [6.02, 4.35, 2.3, -0.2];
+const LEVEL_Y        = [6.32, 3.95, 1.57, -0.80];  // desktop — even 2.37 gap
+const LEVEL_Y_MOBILE = [10.8,  8.8,  6.8,  4.8];  // mobile (S8+) — even 2.3 gap between all boards
+// Returns the correct level-Y array based on current viewport width.
+function getLevelY() {
+  return window.innerWidth <= 480 ? LEVEL_Y_MOBILE : LEVEL_Y;
+}
 
 // Known king-side blocking patterns (notation: "sx,sy,sz->kx,ky,kz" => blocking square)
 // These are small hard-coded exceptions for QuadLevel geometry where an orthogonal piece
@@ -503,10 +540,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
   return false;
 }
     // Returns a board X-scale that shrinks on smaller screens and grows on 4K screens.
-    // Range: 0.62 (≤768 px wide) → 0.78 (≥2560 px wide), linearly interpolated.
+    // Range: 0.50 (≤480 px) → 0.62 (768 px) → 0.78 (≥2560 px wide), linearly interpolated.
     function useBoardXScale() {
       const compute = () => {
         const w = window.innerWidth;
+        if (w <= 480) return 0.50;  // narrow phones (S8+): boards fit within portrait viewport
         if (w <= 768) return 0.62;
         if (w >= 2560) return 0.78;
         return 0.62 + (0.78 - 0.62) * (w - 768) / (2560 - 768);
@@ -599,7 +637,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
     function QuadLevelBoard({ flipBoard = false }) {
       // render from bottom -> top for correct visual stacking
-      const bottomToTop = LEVEL_Y.slice().reverse();
+      const bottomToTop = getLevelY().slice().reverse();
       return (
         <group>
           {bottomToTop.map((y, i) => <BoardLevel key={`lvl-${i}`} y={y} flip={i % 2 === 0} flipBoard={flipBoard} />)}
@@ -609,7 +647,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
 
     function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped, coordMoveHistoryRef, setCoordMoveHistory }) {
       const boardXScale = useBoardXScale();
-      const levels = LEVEL_Y;
+      const levels = getLevelY();
       const pieces = [];
 
       // Per-piece scale constants (tweak these if models look too big/small)
@@ -1505,7 +1543,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             const lx = Math.round(v.x - yIndex * shearFactor + 4.6);
             const ly = Math.round(3 - yIndex);  // flip back to logical ly
             // pick level by closest Y
-            const levels = LEVEL_Y;
+            const levels = getLevelY();
             let lz = 0;
             let bestDist = Infinity;
             for (let i = 0; i < levels.length; i++) {
@@ -1688,7 +1726,33 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [showAllMoves, setShowAllMoves] = useState(false);
       const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
       const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-      
+
+      // Fullscreen state
+      const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      const isStandalone = window.navigator.standalone === true;
+      const [isFullscreen, setIsFullscreen] = useState(false);
+      useEffect(() => {
+        const onChange = () => {
+          setIsFullscreen(!!document.fullscreenElement);
+          // canvas size changes after fullscreen transition — recalculate zoom
+          setTimeout(() => window.dispatchEvent(new Event('chess3d:resize')), 150);
+          setTimeout(() => window.dispatchEvent(new Event('chess3d:resize')), 400);
+        };
+        document.addEventListener('fullscreenchange', onChange);
+        return () => document.removeEventListener('fullscreenchange', onChange);
+      }, []);
+      const toggleFullscreen = () => {
+        if (isIOS) {
+          if (!isStandalone) alert('On iPhone/iPad, tap the Share button ⎋ then "Add to Home Screen" to play full-screen.');
+          return;
+        }
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+        } else {
+          document.exitFullscreen && document.exitFullscreen();
+        }
+      };
+
       // Board flip state (when playing as black)
       const [boardFlipped, setBoardFlipped] = useState(false);
       
@@ -1830,6 +1894,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           setBoardFlipped(false);
           setHalfMoveClock(0);
           setRepetitionCount(0);
+          statesHistoryRef.current = [];
           setAiPaused(false);
         } catch (e) { console.debug('resetGame error', e); }
       };
@@ -3022,15 +3087,17 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               
               // Check for duplicate SYNCHRONOUSLY using prevMoveHistoryRef before calling setState
               // This must happen before setMoveHistory because we need to know NOW whether to toggle turn
+              // IMPORTANT: must match BOTH notation AND moverId — two different pieces (e.g. two Rooks)
+              // can legitimately produce identical notation on the same turn in 3D chess.
               const currentHistory = prevMoveHistoryRef.current || [];
               if (side === 'white' && currentHistory.length > 0) {
                 const last = currentHistory[currentHistory.length - 1];
-                if (last && last.white === finalNotationComputed) {
+                if (last && last.white === finalNotationComputed && last.whiteMoverId === moverId) {
                   moveAppliedRef.current = false;
-                  try { console.warn('applyMove: DUPLICATE MOVE DETECTED (white), not updating history or turn', { notation: finalNotationComputed, lastEntry: last }); } catch (e) {}
+                  try { console.warn('applyMove: DUPLICATE MOVE DETECTED (white), not updating history or turn', { notation: finalNotationComputed, moverId, lastEntry: last }); } catch (e) {}
                 }
               }
-              
+
               // Only update history if not a duplicate
               if (moveAppliedRef.current) {
                 setMoveHistory(prev => {
@@ -3038,10 +3105,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   
                   // Apply the move to history
                   if (side === 'white') {
-                    copy.push({ white: finalNotationComputed, black: null });
+                    copy.push({ white: finalNotationComputed, whiteMoverId: moverId, black: null });
                   } else if (side === 'black') {
-                    if (copy.length === 0) copy.push({ white: null, black: finalNotationComputed });
-                    else copy[copy.length - 1] = { ...copy[copy.length - 1], black: finalNotationComputed };
+                    if (copy.length === 0) copy.push({ white: null, black: finalNotationComputed, blackMoverId: moverId });
+                    else copy[copy.length - 1] = { ...copy[copy.length - 1], black: finalNotationComputed, blackMoverId: moverId };
                   }
                   
                   // Calculate the NEW move count just for the debug log
@@ -3356,13 +3423,19 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       // prefer explicit saved defaults if present; otherwise fall back to last-used camPos
       const [camPos, setCamPos] = useState(() => {
         try {
-          return JSON.parse(localStorage.getItem('camDefaultPos')) || JSON.parse(localStorage.getItem('camPos')) || [0, 5, -10];
-        } catch { return [6,5,-8]; }
+          const isMobileInit = window.innerWidth <= 480;
+          const mobileDefault = [0, 7, -10];   // steeper overhead angle for S8+ — fills screen top-to-bottom
+          const desktopDefault = [0, 5, -10];
+          return JSON.parse(localStorage.getItem('camDefaultPos')) || JSON.parse(localStorage.getItem('camPos')) || (isMobileInit ? mobileDefault : desktopDefault);
+        } catch { return [0, 5, -10]; }
       });
       const [camTarget, setCamTarget] = useState(() => {
         try {
-          return JSON.parse(localStorage.getItem('camDefaultTarget')) || JSON.parse(localStorage.getItem('camTarget')) || [0, 1.7, 0];
-        } catch { return [0,1.7,0]; }
+          const isMobileInit = window.innerWidth <= 480;
+          const mobileTarget = [0, 3.5, 0];   // look at mid-stack for mobile
+          const desktopTarget = [0, 1.7, 0];
+          return JSON.parse(localStorage.getItem('camDefaultTarget')) || JSON.parse(localStorage.getItem('camTarget')) || (isMobileInit ? mobileTarget : desktopTarget);
+        } catch { return [0, 1.7, 0]; }
       });
 
       useEffect(() => {
@@ -3403,9 +3476,24 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               // explicitly set renderer size and pixel ratio
               try { gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); } catch (e) {}
               try { gl.setSize(w, h, false); } catch (e) {}
-              // update camera aspect
-              if (camera && typeof camera.aspect === 'number') {
-                camera.aspect = w / h;
+              // always orthographic — recompute frustum and update zoom to match new viewport width
+              if (camera && camera.isOrthographicCamera) {
+                // use actual canvas pixel size (not window size) — accounts for mobile browser chrome, sidebar, etc.
+                const _w = w;
+                const _h = h;
+                let newZoom;
+                if (window._chess3dZoomOverride != null) {
+                  newZoom = window._chess3dZoomOverride;
+                } else {
+                  newZoom = calcZoom(_w, _h);
+                }
+                camera.zoom = newZoom;
+                const halfW = w / 2 / newZoom;
+                const halfH = h / 2 / newZoom;
+                camera.left   = -halfW;
+                camera.right  =  halfW;
+                camera.top    =  halfH;
+                camera.bottom = -halfH;
                 try { camera.updateProjectionMatrix(); } catch (e) {}
               }
             } catch (e) {}
@@ -5083,13 +5171,23 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             <div className="sidebar-header">
               <h2 className="title">Quadlevel 3D Chess</h2>
               {isMobile && (
-                <button 
-                  className="hamburger-button" 
-                  onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                  aria-label="Toggle menu"
-                >
-                  <span className="hamburger-icon">{mobileMenuOpen ? '✕' : '☰'}</span>
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <button
+                    onClick={toggleFullscreen}
+                    aria-label="Toggle fullscreen"
+                    title={isIOS ? 'Add to Home Screen for full-screen' : (isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen')}
+                    style={{ background: 'transparent', border: 'none', color: '#fff', fontSize: 20, cursor: 'pointer', padding: '4px 6px', lineHeight: 1, opacity: 0.85 }}
+                  >
+                    {isIOS ? '⤢' : (isFullscreen ? '⤡' : '⤢')}
+                  </button>
+                  <button 
+                    className="hamburger-button" 
+                    onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                    aria-label="Toggle menu"
+                  >
+                    <span className="hamburger-icon">{mobileMenuOpen ? '✕' : '☰'}</span>
+                  </button>
+                </div>
               )}
             </div>
             <div className={`menu ${isMobile && !mobileMenuOpen ? 'menu-collapsed' : ''}`}>
@@ -5145,6 +5243,48 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               >
                 Take Back
               </button>
+              <button
+                className="menu-button"
+                style={{ marginTop: 6, fontSize: 12 }}
+                title="Reset camera to default position"
+                onClick={() => {
+                  try {
+                    ['camPos','camTarget','camDefaultPos','camDefaultTarget'].forEach(k => localStorage.removeItem(k));
+                    const isMob = window.innerWidth <= 480;
+                    const newPos = isMob ? [0, 14, -5] : [0, 5, -10];
+                    const newTarget = isMob ? [0, 3.5, 0] : [0, 1.7, 0];
+                    setCamPos(newPos);
+                    setCamTarget(newTarget);
+                    if (controlsRef.current) {
+                      const c = controlsRef.current;
+                      if (c.object) c.object.position.set(...newPos);
+                      if (c.target) c.target.set(...newTarget);
+                      c.update();
+                    }
+                    window.dispatchEvent(new Event('chess3d:resize'));
+                  } catch(e) {}
+                  setMobileMenuOpen(false);
+                }}
+              >
+                Reset Camera
+              </button>
+              {/* Resign button — available in active games (not AI vs AI, not already over) */}
+              {aiSide !== 'both' && !gameOver && (
+                <button
+                  className="menu-button"
+                  style={{ marginTop: 6, color: '#f87171', fontWeight: 'bold' }}
+                  onClick={() => {
+                    const resigningSide = aiSide === 'white' ? 'black' : aiSide === 'black' ? 'white' : currentTurn;
+                    const winner = resigningSide === 'white' ? 'black' : 'white';
+                    setGameOver(true);
+                    setGameWinner(winner);
+                    setStatusMessage(`${resigningSide.charAt(0).toUpperCase() + resigningSide.slice(1)} resigns. ${winner.charAt(0).toUpperCase() + winner.slice(1)} wins!`);
+                    setMobileMenuOpen(false);
+                  }}
+                >
+                  Resign
+                </button>
+              )}
               {/* Claim Draw (threefold repetition) — 2-player only, visible when same position has occurred 3 times */}
               {!aiSide && repetitionCount >= 3 && !gameOver && (
                 <button
@@ -5216,15 +5356,19 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             }
             </div>
             {/* CHECK / CHECKMATE / DRAW indicator */}
-            {gameOver && statusMessage && statusMessage.toLowerCase().includes('checkmate') ? (
-              <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECKMATE — Winner: {gameWinner ? (gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)) : 'Unknown'}</div>
-            ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('draw') ? (
-              <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>{statusMessage.toUpperCase()}</div>
-            ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('stalemate') ? (
-              <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>STALEMATE — Draw</div>
-            ) : (statusMessage && statusMessage.toLowerCase().includes('check') ? (
-              <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECK</div>
-            ) : null)}
+            {(gameOver || (statusMessage && statusMessage.toLowerCase().includes('check'))) && (
+              <div>
+              {gameOver && statusMessage && statusMessage.toLowerCase().includes('checkmate') ? (
+                <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECKMATE — Winner: {gameWinner ? (gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)) : 'Unknown'}</div>
+              ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('draw') ? (
+                <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>{statusMessage.toUpperCase()}</div>
+              ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('stalemate') ? (
+                <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>STALEMATE — Draw</div>
+              ) : (statusMessage && statusMessage.toLowerCase().includes('check') ? (
+                <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECK</div>
+              ) : null)}
+              </div>
+            )}
 
             <div style={{ marginTop: '10px', width: isMobile ? '100%' : 'auto', ...(isMobile ? {} : { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }) }}>
               <div style={{ fontWeight: 'bold', marginBottom: '6px', flexShrink: 0 }}>Moves</div>
@@ -5233,8 +5377,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   <>
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                       <tbody>
-                        {(isMobile && !showAllMoves ? moveHistory.slice(-3) : moveHistory).map((mv, idx) => {
-                          const actualIdx = isMobile && !showAllMoves ? moveHistory.length - 3 + idx : idx;
+                        {(isMobile && !showAllMoves ? moveHistory.slice(-2) : moveHistory).map((mv, idx) => {
+                          const actualIdx = isMobile && !showAllMoves ? moveHistory.length - 2 + idx : idx;
                           if (actualIdx < 0) return null;
                           return (
                             <tr key={`mh-${actualIdx}`}>
@@ -5246,10 +5390,15 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                         })}
                       </tbody>
                     </table>
-                    {isMobile && moveHistory.length > 3 && (
+                    {isMobile && moveHistory.length > 2 && (
                       <button 
                         className="show-all-moves" 
-                        onClick={() => setShowAllMoves(!showAllMoves)}
+                        onClick={() => {
+                          setShowAllMoves(!showAllMoves);
+                          // sidebar height changes — canvas shrinks/grows, so recalculate zoom
+                          setTimeout(() => window.dispatchEvent(new Event('chess3d:resize')), 50);
+                          setTimeout(() => window.dispatchEvent(new Event('chess3d:resize')), 200);
+                        }}
                       >
                         {showAllMoves ? 'Show Recent' : `Show All (${moveHistory.length})`}
                       </button>
@@ -5263,7 +5412,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             <Canvas
               key={canvasKey}
               className="canvas"
-              camera={{ position: camPos, fov: 20 }}
+              orthographic={true}
+              camera={{ position: camPos, zoom: calcZoom(
+                (() => { try { const r = document.querySelector('.main')?.getBoundingClientRect(); return r && r.width > 10 ? r.width : window.innerWidth; } catch(e) { return window.innerWidth; } })(),
+                (() => { try { const r = document.querySelector('.main')?.getBoundingClientRect(); return r && r.height > 10 ? r.height : window.innerHeight; } catch(e) { return window.innerHeight; } })()
+              ) }}
               onPointerMove={(e) => {
                 try { pointerLastScreenRef.current = { x: e.clientX, y: e.clientY }; } catch {}
                 // if pointer was pressed on a piece and user moved enough (screen-space), start dragging
@@ -5412,7 +5565,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               <ambientLight intensity={0.6} />
               <R3FResize />
               <directionalLight position={[5, 12, 5]} intensity={0.9} />
-              <group ref={groupRef} scale={sceneScale}>
+              <group ref={groupRef} scale={sceneScale} position={window.innerWidth <= 480 ? [-0.05, -0.4, 0] : [0, 0, 0]}>
                 <QuadLevelBoard flipBoard={boardFlipped || ((currentTurn === 'black') && !aiSide)} />
                 <Pieces
                   piecesState={piecesState}

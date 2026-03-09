@@ -6,6 +6,6 @@
 //export const API_BASE_URL = 'http://localhost:5000';
 
 // Production (backend on GoDaddy) - UPDATE WITH YOUR ACTUAL DOMAIN
- export const API_BASE_URL = 'https://chess3d.com/chess3dapi3';
+export const API_BASE_URL = 'https://chess3d.com/chess3dapi3';
 
 // Replace YOUR_DOMAIN_HERE.com with your actual GoDaddy domain

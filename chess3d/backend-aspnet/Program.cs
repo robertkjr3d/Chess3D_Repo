@@ -92,7 +92,29 @@ using (var scope = app.Services.CreateScope())
             Console.WriteLine("Testing MySQL connection...");
             db.Database.EnsureCreated();
             Console.WriteLine("✓ MySQL database initialized successfully");
-            
+
+            // EnsureCreated won't add new tables to an existing DB — create new tables explicitly
+            try
+            {
+                db.Database.ExecuteSqlRaw(@"
+                    CREATE TABLE IF NOT EXISTS `ZoomCalibrations` (
+                        `Id`               INT             NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        `ScreenWidth`      INT             NOT NULL,
+                        `ScreenHeight`     INT             NOT NULL,
+                        `ZoomLevel`        DOUBLE          NOT NULL,
+                        `IsMobile`         TINYINT(1)      NOT NULL DEFAULT 0,
+                        `UserAgent`        TEXT            NOT NULL,
+                        `DevicePixelRatio` DOUBLE          NOT NULL DEFAULT 1,
+                        `CreatedAt`        DATETIME(6)     NOT NULL
+                    ) CHARACTER SET utf8mb4;
+                ");
+                Console.WriteLine("✓ ZoomCalibrations table ensured");
+            }
+            catch (Exception exTbl)
+            {
+                Console.WriteLine($"⚠ ZoomCalibrations table creation warning: {exTbl.Message}");
+            }
+
             // Test query
             var count = db.Games.Count();
             Console.WriteLine($"✓ Database query test passed. Current games count: {count}");
