@@ -648,7 +648,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       );
     }
 
-    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped, coordMoveHistoryRef, setCoordMoveHistory }) {
+    function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped, coordMoveHistoryRef, setCoordMoveHistory, inHistoryView, displayPiecesOverride }) {
       const boardXScale = useBoardXScale();
       const levels = getLevelY();
       const pieces = [];
@@ -657,7 +657,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const scaleMap = GLOBAL_PIECE_SCALE;
 
       // piecesState is an array of piece objects with {id,x,y,z,t,color}
-      const allPieces = piecesState;
+      // When in history view, displayPiecesOverride contains the snapshot pieces to render
+      const allPieces = displayPiecesOverride || piecesState;
 
       // occupancy set keyed by logical coords (unused currently)
 
@@ -1135,6 +1136,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               try { if (pointerStartScreenRef) pointerStartScreenRef.current = { x: e.clientX, y: e.clientY }; } catch {}
               // toggle selection when clicking same piece
                   if (gameOver) return;
+                  if (inHistoryView) return; // block piece interaction while browsing history
                   // ignore input while a move is being applied
                   if (moveLockRef.current) return;
                   if (p.color === currentTurn) {
@@ -1492,6 +1494,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       // when App reports a pendingDrop, decide whether it's a legal landing square
       useEffect(() => {
         if (!pendingDrop) return;
+        if (inHistoryView) { setPendingDrop(null); return; } // ignore drops in history view
         if (selectedPieceId == null) {
           setPendingDrop(null);
           return;
@@ -1903,6 +1906,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           setRepetitionCount(0);
           statesHistoryRef.current = [];
           setAiPaused(false);
+          setViewIndex(null);
+          setViewedPieces(null);
         } catch (e) { console.debug('resetGame error', e); }
       };
       const prevPiecesRef = useRef(piecesState);
@@ -1930,6 +1935,39 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           try { if (typeof pushDebug === 'function') pushDebug('pushedSnapshot', { depth: statesHistoryRef.current.length }); } catch (e) {}
         } catch (e) { console.debug('pushStateSnapshot failed', e); }
       }, [piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted, halfMoveClock]);
+
+      // navigate the play-through history; idx=null means go to live position
+      const navigatePlayThrough = useCallback((idx) => {
+        try {
+          const snapshots = statesHistoryRef.current;
+          const total = snapshots.length;
+          if (idx === null || idx >= total) {
+            // Navigate to live position
+            setViewIndex(null);
+            setViewedPieces(null);
+            setSelectedPieceId(null);
+            // In AI vs AI: resume the engine if the game is still going
+            if (aiSide === 'both' && !gameOver) {
+              aiLastMoveCountRef.current = -1;
+              setAiPaused(false);
+            }
+          } else {
+            const clampedIdx = Math.max(0, Math.min(idx, total - 1));
+            setViewIndex(clampedIdx);
+            setViewedPieces((snapshots[clampedIdx]?.piecesState || []).map(p => ({ ...p })));
+            setSelectedPieceId(null);
+            // In AI vs AI: auto-pause when the user navigates into history
+            if (aiSide === 'both' && !gameOver && !aiPausedRef.current) {
+              if (aiTimeoutRef.current.id) {
+                clearTimeout(aiTimeoutRef.current.id);
+                aiTimeoutRef.current = { id: null, moveCount: null };
+                aiLastMoveCountRef.current = -1;
+              }
+              setAiPaused(true);
+            }
+          }
+        } catch (e) { console.debug('navigatePlayThrough failed', e); }
+      }, [aiSide, gameOver]);
 
       useEffect(() => { prevMoveHistoryRef.current = moveHistory; }, [moveHistory]);
 
@@ -2293,6 +2331,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [aiPaused, setAiPaused] = useState(false); // pause AI vs AI
       const aiPausedRef = useRef(false);
       useEffect(() => { aiPausedRef.current = aiPaused; }, [aiPaused]);
+      const [viewIndex, setViewIndex] = useState(null); // null = live; 0..N-1 = play-through snapshot index
+      const [viewedPieces, setViewedPieces] = useState(null); // display-only pieces when browsing history
 
       // helper: order moves (captures first, then center-oriented), prefer moves that reduce undefended pieces
       const orderMoves = useCallback((moves, pieces, side) => {
@@ -3621,6 +3661,65 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const SERVER_ID_KEY = 'chess3d:server_id';
       const SERVER_TOKEN_KEY = 'chess3d:server_token';
 
+      // Replay all coordMoves from the initial position and return an array of
+      // { piecesState, currentTurn } snapshots (one per move, taken BEFORE the move is applied).
+      // Used to rebuild statesHistoryRef when loading a saved game so play-through works.
+      const replayToSnapshots = (coordMoves) => {
+        try {
+          if (!coordMoves || coordMoves.length === 0) return [];
+          const parseCoord = (s) => ({
+            z: parseInt(s[0], 10) - 1,       // level 1-4 → z 0-3
+            y: s.charCodeAt(1) - 97,          // a-d → 0-3
+            x: 8 - parseInt(s[2], 10)          // rank 1-8 → x 7-0
+          });
+          let pieces = getInitialPieces();
+          const snapshots = [];
+          let turn = 'white';
+          for (const coordMove of coordMoves) {
+            if (!coordMove || coordMove.length < 6) continue;
+            const from = parseCoord(coordMove.slice(0, 3));
+            const to   = parseCoord(coordMove.slice(3, 6));
+            // snapshot BEFORE this move
+            snapshots.push({ piecesState: pieces.map(p => ({ ...p })), currentTurn: turn });
+            const mover = pieces.find(p => p.x === from.x && p.y === from.y && p.z === from.z);
+            if (!mover) { turn = turn === 'white' ? 'black' : 'white'; continue; }
+            let target = { ...to };
+            // Castle detection: king moves ≥2 steps in Y or Z
+            if (mover.t === 'K') {
+              const dy = Math.abs(to.y - from.y);
+              const dz = Math.abs(to.z - from.z);
+              if (dy >= 2 || dz >= 2) {
+                let rookId = null, rookTo = null;
+                if (dy >= 2) {
+                  const rookY = to.y > from.y ? 3 : 0;
+                  const rook = pieces.find(p => p.t === 'R' && p.color === mover.color && p.x === from.x && p.y === rookY && p.z === from.z && !p.hasMoved);
+                  if (rook) { rookId = rook.id; rookTo = { x: from.x, y: from.y, z: from.z }; }
+                } else {
+                  const rookZ = to.z > from.z ? 3 : 0;
+                  const rook = pieces.find(p => p.t === 'R' && p.color === mover.color && p.x === from.x && p.y === from.y && p.z === rookZ && !p.hasMoved);
+                  if (rook) { rookId = rook.id; rookTo = { x: from.x, y: from.y, z: from.z }; }
+                }
+                if (rookId) target = { ...to, castle: { rookId, rookTo } };
+              }
+            }
+            // En-passant detection: pawn moves diagonally to an empty square
+            if (mover.t === 'p') {
+              const diagonal = Math.abs(to.y - from.y) === 1 || Math.abs(to.z - from.z) === 1;
+              if (diagonal) {
+                const destOcc = pieces.find(p => p.x === to.x && p.y === to.y && p.z === to.z);
+                if (!destOcc) {
+                  const cap = pieces.find(p => p.t === 'p' && p.color !== mover.color && p.x === from.x && p.y === to.y && p.z === to.z);
+                  if (cap) target = { ...to, capturedId: cap.id };
+                }
+              }
+            }
+            pieces = simulateMove(pieces, mover.id, target);
+            turn = turn === 'white' ? 'black' : 'white';
+          }
+          return snapshots;
+        } catch (e) { console.debug('replayToSnapshots error', e); return []; }
+      };
+
       const exportGame = () => {
         try {
           // build a human-readable move notation array for easier inspection
@@ -3630,7 +3729,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             const left = `${idx + 1}. ${white}`.trim();
             return black ? `${left} ${black}` : left;
           });
-          const payload = { piecesState, moveHistory, moveNotation, currentTurn, lastMove, aiSide, gameStarted };
+          const payload = { piecesState, moveHistory, moveNotation, coordMoveHistory, currentTurn, lastMove, aiSide, gameStarted };
           const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -3666,6 +3765,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             setLastMove(obj.lastMove || null);
             try { setAiSide(obj.aiSide || null); } catch (e) {}
             try { setGameStarted(!!obj.gameStarted); } catch (e) {}
+            // Rebuild play-through snapshots from coord move history
+            statesHistoryRef.current = replayToSnapshots(importedCoord);
+            setViewIndex(null);
+            setViewedPieces(null);
             alert('Game imported');
           } else alert('Invalid file');
         } catch (e) { alert('Import failed'); }
@@ -3702,6 +3805,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           setLastMove(obj.lastMove || null);
           try { setAiSide(obj.aiSide || null); } catch (e) {}
           try { setGameStarted(!!obj.gameStarted); } catch (e) {}
+          // Rebuild play-through snapshots
+          statesHistoryRef.current = replayToSnapshots(localCoord);
+          setViewIndex(null);
+          setViewedPieces(null);
         } catch (e) { alert('Local load failed'); }
       };
 
@@ -3841,6 +3948,10 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               localStorage.setItem(SERVER_ID_KEY, j.id);
               localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
             }
+            // Rebuild play-through snapshots from coord move history
+            statesHistoryRef.current = replayToSnapshots(serverCoord);
+            setViewIndex(null);
+            setViewedPieces(null);
             try { 
               console.log('loadFromServer: AFTER setState calls (async, may not be applied yet)', {
                 refNow: aiLastMoveCountRef.current
@@ -4025,8 +4136,9 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           return;
         }
         
-        // Don't start next move if paused
+        // Don't start next move if paused or while the user is browsing history
         if (aiPaused) return;
+        if (viewIndex !== null) return;
 
         // IMMEDIATELY mark this move count as being processed to preventrace conditions
         // This prevents multiple setTimeout instances from starting if useEffect fires rapidly
@@ -5203,7 +5315,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             }
           }
         };
-      }, [currentTurn, aiSide, aiStrength, aiDelay, aiPaused, piecesState, gameOver, moveHistory, getAllLegalMoves, simulateMove, negamax, applyMove, generateMoveNotation, orderMoves, isAnyKingInCheck, staticExchangeEval, attackersOfSquare, rebuildCoordMoveHistory]);
+      }, [currentTurn, aiSide, aiStrength, aiDelay, aiPaused, viewIndex, piecesState, gameOver, moveHistory, getAllLegalMoves, simulateMove, negamax, applyMove, generateMoveNotation, orderMoves, isAnyKingInCheck, staticExchangeEval, attackersOfSquare, rebuildCoordMoveHistory]);
 
       // keep OrbitControls enabled state in sync with pointer interaction/dragging
       useEffect(() => {
@@ -5528,6 +5640,69 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             )}
           </aside>
           <main className="main">
+            {/* ── Play-through navigation overlay ── */}
+            {(() => {
+              const snapLen = statesHistoryRef.current.length;
+              // In AI vs AI the buttons are only accessible when paused or game is over
+              const canPlayThrough = gameStarted && (aiSide !== 'both' || aiPaused || gameOver);
+              const atBeginning = viewIndex === 0;
+              const atLive = viewIndex === null;
+              const showBack = canPlayThrough && snapLen > 0 && !atBeginning;
+              const showForward = canPlayThrough && !atLive;
+              if (!showBack && !showForward) return null;
+              const btnBase = {
+                background: 'rgba(15,15,15,0.72)',
+                color: '#fff',
+                border: '1.5px solid rgba(255,255,255,0.38)',
+                borderRadius: '50%',
+                width: 36, height: 36,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', fontSize: 17, padding: 0, lineHeight: 1,
+                userSelect: 'none', WebkitUserSelect: 'none',
+                touchAction: 'manipulation',
+                boxShadow: '0 2px 6px rgba(0,0,0,0.5)',
+              };
+              const goBack1 = () => navigatePlayThrough(atLive ? snapLen - 1 : viewIndex - 1);
+              const goBackAll = () => navigatePlayThrough(0);
+              const goFwd1 = () => navigatePlayThrough(viewIndex + 1 >= snapLen ? null : viewIndex + 1);
+              const goFwdAll = () => navigatePlayThrough(null);
+              if (isMobile) {
+                // Mobile: individual buttons staggered vertically to sit between boards
+                return (
+                  <>
+                    {showBack && (
+                      <>
+                        <button onClick={goBack1} title="Previous move" style={{ ...btnBase, position: 'absolute', left: 6, top: '25%', zIndex: 20, transform: 'translateY(-50%)' }}>&#9664;</button>
+                        <button onClick={goBackAll} title="First move" style={{ ...btnBase, position: 'absolute', left: 6, top: '52%', zIndex: 20, transform: 'translateY(-50%)' }}>&#9198;</button>
+                      </>
+                    )}
+                    {showForward && (
+                      <>
+                        <button onClick={goFwd1} title="Next move" style={{ ...btnBase, position: 'absolute', right: 6, top: '25%', zIndex: 20, transform: 'translateY(-50%)' }}>&#9654;</button>
+                        <button onClick={goFwdAll} title="Live (end)" style={{ ...btnBase, position: 'absolute', right: 6, top: '52%', zIndex: 20, transform: 'translateY(-50%)' }}>&#9197;</button>
+                      </>
+                    )}
+                  </>
+                );
+              }
+              // Desktop: two flex columns centred on left / right edges of the board
+              return (
+                <>
+                  {showBack && (
+                    <div style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', zIndex: 20, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, pointerEvents: 'auto' }}>
+                      <button onClick={goBackAll} title="First move" style={btnBase}>&#9198;</button>
+                      <button onClick={goBack1} title="Previous move" style={btnBase}>&#9664;</button>
+                    </div>
+                  )}
+                  {showForward && (
+                    <div style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', zIndex: 20, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, pointerEvents: 'auto' }}>
+                      <button onClick={goFwd1} title="Next move" style={btnBase}>&#9654;</button>
+                      <button onClick={goFwdAll} title="Live (end)" style={btnBase}>&#9197;</button>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
             <Canvas
               key={canvasKey}
               className="canvas"
@@ -5735,6 +5910,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     boardFlipped={boardFlipped}
                     coordMoveHistoryRef={coordMoveHistoryRef}
                     setCoordMoveHistory={setCoordMoveHistory}
+                    inHistoryView={viewIndex !== null}
+                    displayPiecesOverride={viewedPieces}
                 />
                 <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} currentTurn={currentTurn} />
                 
