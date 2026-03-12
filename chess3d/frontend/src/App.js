@@ -15,7 +15,7 @@ function calcZoom(w, h) {
     // Mobile: width-based device-model lookup
     let base;
     if (w <= 344) base = 12.3;       // narrow tall phones (344×882)
-    else if (w <= 360) base = 12.2;  // S8+  (360×740)
+    else if (w <= 360) base = (h >= 780) ? 14.2 : 12.2;  // Note20Ultra (360×800)=14.2, S8+ (360×740)=12.2
     else if (w <= 375) base = 11.4;  // iPhone SE  (375×667) — short screen
     else if (w <= 390) base = 13.1;  // iPhone 14  (390×844)
     else if (w <= 414) base = 13.1;  // large Android phones (412–414)
@@ -25,10 +25,13 @@ function calcZoom(w, h) {
     // Height correction: if canvas is shorter than the natural height for this
     // phone (approx w*1.5), reduce zoom so the board still fits vertically.
     // Skip when fullscreen — the full viewport is available, no correction needed.
+    // Skip when h <= 150 — indicates a transient/unsettled layout state (canvas
+    // remount, fullscreen animation, etc.) where clientHeight hasn't settled yet;
+    // applying correction on those spurious values causes the board to go tiny.
     // Slope 0.014 per pixel short ≈ 0.7 drop per 50px height reduction.
-    if (h && !document.fullscreenElement) {
+    if (h > 150 && !document.fullscreenElement) {
       const refH = w * 1.5;
-      if (h < refH) base = Math.max(base * 0.75, base - (refH - h) * 0.014);
+      if (h < refH) base = Math.max(base * 0.85, base - (refH - h) * 0.014);
     }
     return base;
   }
@@ -1694,6 +1697,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [currentTurn, setCurrentTurn] = useState('white');
       const [gameOver, setGameOver] = useState(false);
       const [gameWinner, setGameWinner] = useState(null);
+      const [showGameOverModal, setShowGameOverModal] = useState(false);
       const [statusMessage, setStatusMessage] = useState('');
       const [halfMoveClock, setHalfMoveClock] = useState(0); // 50-move rule: resets on pawn move or capture
       const [repetitionCount, setRepetitionCount] = useState(0); // threefold repetition tracking
@@ -1711,9 +1715,11 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [moveHistory, setMoveHistory] = useState([]); // array of { white: string|null, black: string|null }
       const [coordMoveHistory, setCoordMoveHistory] = useState([]); // flat array of raw coord strings e.g. "2d82c6" — sent to Stockfish backend
       const [canvasKey, setCanvasKey] = useState(0);
+      // Auto-show the game-over modal whenever the game ends.
+      // Separated from gameOver so Dismiss closes the popup without re-enabling the AI.
       useEffect(() => {
-        try { console.debug('canvasKey changed ->', canvasKey); } catch (e) {}
-      }, [canvasKey]);
+        if (gameOver) setShowGameOverModal(true);
+      }, [gameOver]);
       const [gameStarted, setGameStarted] = useState(false);
       const [isDragging, setIsDragging] = useState(false);
       const [dragPoint, setDragPoint] = useState([0, 0, 0]);
@@ -1890,6 +1896,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           setSelectedPieceId(null);
           setGameOver(false);
           setGameWinner(null);
+          setShowGameOverModal(false);
           setStatusMessage('');
           setBoardFlipped(false);
           setHalfMoveClock(0);
@@ -3419,6 +3426,22 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       // camera / controls persistence
       const controlsRef = useRef();
       const importInputRef = useRef(null);
+      const sidebarRef = useRef(null);
+
+      // Keep --sidebar-h CSS variable in sync with actual sidebar height so the
+      // fixed-position mobile menu is always anchored right below the header bar.
+      useEffect(() => {
+        const sidebar = sidebarRef.current;
+        if (!sidebar) return;
+        const update = () => {
+          const h = sidebar.getBoundingClientRect().height;
+          document.documentElement.style.setProperty('--sidebar-h', `${Math.round(h)}px`);
+        };
+        update();
+        const ro = new ResizeObserver(update);
+        ro.observe(sidebar);
+        return () => ro.disconnect();
+      }, []);
       const moveListRef = useRef(null); // for auto-scrolling the moves list to the latest entry
       // prefer explicit saved defaults if present; otherwise fall back to last-used camPos
       const [camPos, setCamPos] = useState(() => {
@@ -3459,6 +3482,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         useEffect(() => {
           const handler = () => {
             try { console.debug('R3FResize handler invoked'); } catch (e) {}
+            if (window._chess3dMenuAnimating) return; // suppress during menu slide animation
             try {
               const canvas = gl && gl.domElement;
               if (!canvas) return;
@@ -3510,13 +3534,79 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
         return null;
       }
 
+      // BoardBoundsGuard: after the camera zoom settles, project the world-space position
+      // of the bottom board's front D-row (the southernmost row of the lowest board) into
+      // NDC. If it falls below the viewport bottom (NDC y < -0.92), iteratively reduce zoom
+      // until the row is fully visible. Runs after R3FResize's 50/200/500 ms timers settle.
+      function BoardBoundsGuard() {
+        const { camera, gl } = useThree();
+        useEffect(() => {
+          const check = () => {
+            try {
+              if (!camera || !camera.isOrthographicCamera) return;
+              const sc = 0.470; // must match sceneScale constant
+              const isMob = window.innerWidth <= 480;
+              // Bottom board Y in object space (index 3 = lowest board in the stack)
+              const levelYObj = (isMob ? LEVEL_Y_MOBILE : LEVEL_Y)[3];
+              const groupY = isMob ? -0.4 : 0; // group position offset
+              // World-space position of the front D-row centre on the bottom board.
+              // Object-space worldZ ≈ 3.5 (yIndex=3 row centre at z=3, plus ~0.5 front-face overhang).
+              const worldY = levelYObj * sc + groupY;
+              const worldZ = 3.5 * sc;
+              const pt = new THREE.Vector3(0, worldY, worldZ);
+              pt.project(camera); // NDC: y=+1 top, y=-1 bottom
+              if (pt.y < -0.92) {
+                // row is below viewport — nudge zoom down until it fits
+                let zoom = camera.zoom;
+                for (let i = 0; i < 30; i++) {
+                  zoom *= 0.96;
+                  camera.zoom = zoom;
+                  camera.updateProjectionMatrix();
+                  const tp = new THREE.Vector3(0, worldY, worldZ);
+                  tp.project(camera);
+                  if (tp.y >= -0.92) break;
+                }
+                // recompute frustum planes for the adjusted zoom
+                const canvas = gl.domElement;
+                const w = Math.max(1, canvas.clientWidth || canvas.width);
+                const h = Math.max(1, canvas.clientHeight || canvas.height);
+                camera.left   = -w / 2 / zoom;
+                camera.right  =  w / 2 / zoom;
+                camera.top    =  h / 2 / zoom;
+                camera.bottom = -h / 2 / zoom;
+                camera.updateProjectionMatrix();
+              }
+            } catch (e) {}
+          };
+          const t1 = setTimeout(check, 700);
+          const t2 = setTimeout(check, 1400);
+          const pending = { id: null };
+          const onResize = () => {
+            if (pending.id) clearTimeout(pending.id);
+            pending.id = setTimeout(check, 200);
+          };
+          window.addEventListener('chess3d:resize', onResize);
+          return () => {
+            clearTimeout(t1);
+            clearTimeout(t2);
+            if (pending.id) clearTimeout(pending.id);
+            window.removeEventListener('chess3d:resize', onResize);
+          };
+        }, [camera, gl]);
+        return null;
+      }
+
       // remount the Canvas after a resize finishes (debounced) to emulate full-refresh initialization
+      // Skip remounting during mobile menu animation — the resize triggered by the menu sliding
+      // open/closed is internal layout noise; remounting the canvas causes a visible blank flash.
       useEffect(() => {
         const timer = { id: null };
         const handler = () => {
           try {
+            if (window._chess3dMenuAnimating) return; // menu open/close noise — don't remount
             if (timer.id) clearTimeout(timer.id);
             timer.id = setTimeout(() => {
+              if (window._chess3dMenuAnimating) { timer.id = null; return; }
               try { setCanvasKey(k => k + 1); } catch (e) {}
               timer.id = null;
             }, 250);
@@ -5167,7 +5257,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       return (
         <>
         <div className="layout">
-                <aside className="sidebar">
+                <aside className="sidebar" ref={sidebarRef}>
             <div className="sidebar-header">
               <h2 className="title">Quadlevel 3D Chess</h2>
               {isMobile && (
@@ -5182,7 +5272,14 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   </button>
                   <button 
                     className="hamburger-button" 
-                    onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                    onClick={() => {
+                      // flag that the menu is animating (0.3s CSS transition + buffer)
+                      // so resize handlers triggered by the layout shift don't remount the canvas
+                      window._chess3dMenuAnimating = true;
+                      if (window._chess3dMenuAnimTimer) clearTimeout(window._chess3dMenuAnimTimer);
+                      window._chess3dMenuAnimTimer = setTimeout(() => { window._chess3dMenuAnimating = false; }, 450);
+                      setMobileMenuOpen(!mobileMenuOpen);
+                    }}
                     aria-label="Toggle menu"
                   >
                     <span className="hamburger-icon">{mobileMenuOpen ? '✕' : '☰'}</span>
@@ -5203,7 +5300,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     Play AI Black
                   </button>
                   <button className="menu-button" onClick={() => { resetGame(); setAiSide('both'); setGameStarted(true); setMobileMenuOpen(false); }}>
-                    Play AI vs AI
+                    Watch AI vs AI
                   </button>
                   <hr />
                   <input ref={importInputRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => { if (e.target.files && e.target.files[0]) { importGame(e.target.files[0]); setGameStarted(true); } e.target.value = null; }} />
@@ -5251,7 +5348,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   try {
                     ['camPos','camTarget','camDefaultPos','camDefaultTarget'].forEach(k => localStorage.removeItem(k));
                     const isMob = window.innerWidth <= 480;
-                    const newPos = isMob ? [0, 14, -5] : [0, 5, -10];
+                    const newPos = isMob ? [0, 7, -10] : [0, 5, -10];  // matches initial camPos default
                     const newTarget = isMob ? [0, 3.5, 0] : [0, 1.7, 0];
                     setCamPos(newPos);
                     setCamTarget(newTarget);
@@ -5355,30 +5452,33 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               )
             }
             </div>
-            {/* CHECK / CHECKMATE / DRAW indicator */}
-            {(gameOver || (statusMessage && statusMessage.toLowerCase().includes('check'))) && (
-              <div>
+            {/* CHECK / CHECKMATE / DRAW indicator — always rendered at fixed height on mobile so
+                the sidebar never resizes (which would repaint the canvas). */}
+            <div style={isMobile ? { height: '28px', overflow: 'hidden', marginTop: '4px' } : {}}>
               {gameOver && statusMessage && statusMessage.toLowerCase().includes('checkmate') ? (
-                <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECKMATE — Winner: {gameWinner ? (gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)) : 'Unknown'}</div>
+                <div style={{ color: 'red', fontWeight: 'bold' }}>CHECKMATE — Winner: {gameWinner ? (gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)) : 'Unknown'}</div>
               ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('draw') ? (
-                <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>{statusMessage.toUpperCase()}</div>
+                <div style={{ color: '#c8a000', fontWeight: 'bold' }}>{statusMessage.toUpperCase()}</div>
               ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('stalemate') ? (
-                <div style={{ color: '#c8a000', fontWeight: 'bold', marginTop: '8px' }}>STALEMATE — Draw</div>
+                <div style={{ color: '#c8a000', fontWeight: 'bold' }}>STALEMATE — Draw</div>
+              ) : gameOver && statusMessage && statusMessage.toLowerCase().includes('resign') ? (
+                <div style={{ color: '#c8a000', fontWeight: 'bold' }}>RESIGNED</div>
+              ) : gameOver ? (
+                <div style={{ color: '#c8a000', fontWeight: 'bold' }}>GAME OVER</div>
               ) : (statusMessage && statusMessage.toLowerCase().includes('check') ? (
-                <div style={{ color: 'red', fontWeight: 'bold', marginTop: '8px' }}>CHECK</div>
+                <div style={{ color: 'red', fontWeight: 'bold' }}>CHECK</div>
               ) : null)}
-              </div>
-            )}
+            </div>
 
             <div style={{ marginTop: '10px', width: isMobile ? '100%' : 'auto', ...(isMobile ? {} : { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }) }}>
               <div style={{ fontWeight: 'bold', marginBottom: '6px', flexShrink: 0 }}>Moves</div>
-              <div ref={!isMobile ? moveListRef : null} style={{ fontFamily: 'monospace', fontSize: '13px', ...(isMobile ? {} : { overflowY: 'auto', flex: 1, minHeight: 0 }) }}>
+              <div ref={!isMobile ? moveListRef : null} style={{ fontFamily: 'monospace', fontSize: '13px', ...(isMobile ? { height: '72px', overflowY: 'hidden', overflowX: 'hidden' } : { overflowY: 'auto', overflowX: 'hidden', flex: 1, minHeight: 0 }) }}>
                 {moveHistory.length === 0 ? <div style={{ color: '#888' }}>no moves</div> : (
                   <>
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                       <tbody>
-                        {(isMobile && !showAllMoves ? moveHistory.slice(-2) : moveHistory).map((mv, idx) => {
-                          const actualIdx = isMobile && !showAllMoves ? moveHistory.length - 2 + idx : idx;
+                        {(isMobile ? moveHistory.slice(-2) : moveHistory).map((mv, idx) => {
+                          const actualIdx = isMobile ? moveHistory.length - 2 + idx : idx;
                           if (actualIdx < 0) return null;
                           return (
                             <tr key={`mh-${actualIdx}`}>
@@ -5393,20 +5493,39 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     {isMobile && moveHistory.length > 2 && (
                       <button 
                         className="show-all-moves" 
-                        onClick={() => {
-                          setShowAllMoves(!showAllMoves);
-                          // sidebar height changes — canvas shrinks/grows, so recalculate zoom
-                          setTimeout(() => window.dispatchEvent(new Event('chess3d:resize')), 50);
-                          setTimeout(() => window.dispatchEvent(new Event('chess3d:resize')), 200);
-                        }}
+                        onClick={() => setShowAllMoves(true)}
                       >
-                        {showAllMoves ? 'Show Recent' : `Show All (${moveHistory.length})`}
+                        {`Show All (${moveHistory.length})`}
                       </button>
                     )}
                   </>
                 )}
               </div>
             </div>
+            {/* Mobile moves overlay — fixed panel over canvas, like the hamburger menu */}
+            {isMobile && showAllMoves && (
+              <div className="moves-overlay" onClick={() => setShowAllMoves(false)}>
+                <div className="moves-overlay-panel" onClick={e => e.stopPropagation()}>
+                  <div className="moves-overlay-header">
+                    <span style={{ fontWeight: 'bold', fontSize: 14 }}>All Moves ({moveHistory.length})</span>
+                    <button className="moves-overlay-close" onClick={() => setShowAllMoves(false)}>✕</button>
+                  </div>
+                  <div style={{ overflowY: 'auto', flex: 1, minHeight: 0, fontFamily: 'monospace', fontSize: 13, padding: '0 4px' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <tbody>
+                        {moveHistory.map((mv, idx) => (
+                          <tr key={`mh-all-${idx}`}>
+                            <td style={{ width: '34px', paddingRight: '4px', color: '#aaa' }}>{idx + 1}:</td>
+                            <td style={{ width: '50%', paddingRight: '4px' }}>{mv.white || ''}</td>
+                            <td>{mv.black || ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
           </aside>
           <main className="main">
             <Canvas
@@ -5564,6 +5683,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               <CanvasLogger canvasKey={canvasKey} />
               <ambientLight intensity={0.6} />
               <R3FResize />
+              <BoardBoundsGuard />
               <directionalLight position={[5, 12, 5]} intensity={0.9} />
               <group ref={groupRef} scale={sceneScale} position={window.innerWidth <= 480 ? [-0.05, -0.4, 0] : [0, 0, 0]}>
                 <QuadLevelBoard flipBoard={boardFlipped || ((currentTurn === 'black') && !aiSide)} />
@@ -5686,6 +5806,52 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             </div>
           </div>
         ) : null}
+
+        {/* Game Over modal — appears on checkmate, stalemate, draw, or resignation */}
+        {showGameOverModal && gameOver && (() => {
+          let heading, sub, color;
+          const msg = (statusMessage || '').toLowerCase();
+          if (msg.includes('checkmate')) {
+            heading = 'Checkmate!';
+            sub = gameWinner ? `${gameWinner.charAt(0).toUpperCase() + gameWinner.slice(1)} wins!` : '';
+            color = '#dc2626';
+          } else if (msg.includes('resign')) {
+            heading = 'Game Over';
+            sub = statusMessage;
+            color = '#b45309';
+          } else if (msg.includes('stalemate')) {
+            heading = 'Stalemate';
+            sub = 'The game is a draw.';
+            color = '#b45309';
+          } else if (msg.includes('draw')) {
+            heading = 'Draw';
+            sub = statusMessage;
+            color = '#b45309';
+          } else {
+            heading = 'Game Over';
+            sub = statusMessage || '';
+            color = '#374151';
+          }
+          return (
+            <div style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto', zIndex: 10002 }}>
+              <div style={{ background: 'rgba(0,0,0,0.55)', position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} onClick={() => {}} />
+              <div style={{ zIndex: 10003, background: '#1f2937', color: '#fff', padding: '28px 24px', borderRadius: 12, minWidth: 280, maxWidth: '88vw', boxShadow: '0 16px 48px rgba(0,0,0,0.6)', textAlign: 'center', position: 'relative' }}>
+                <div style={{ fontSize: 26, fontWeight: 'bold', color, marginBottom: 8 }}>{heading}</div>
+                {sub && <div style={{ fontSize: 15, color: '#d1d5db', marginBottom: 20 }}>{sub}</div>}
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                  <button
+                    onClick={() => { resetGame(); setAiSide(null); setGameStarted(false); setShowGameOverModal(false); setMobileMenuOpen(false); }}
+                    style={{ padding: '10px 20px', borderRadius: 6, background: '#e5e7eb', color: '#111', border: 'none', fontWeight: 'bold', fontSize: 14, cursor: 'pointer' }}
+                  >New Game</button>
+                  <button
+                    onClick={() => setShowGameOverModal(false)}
+                    style={{ padding: '10px 20px', borderRadius: 6, background: '#374151', color: '#fff', border: 'none', fontWeight: 'bold', fontSize: 14, cursor: 'pointer' }}
+                  >Dismiss</button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         </>
       );

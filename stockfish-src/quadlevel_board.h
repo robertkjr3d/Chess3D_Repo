@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -437,12 +438,13 @@ inline std::vector<Move3D> Position3D::generate_pseudo_legal(Color us) const {
             }
 
             // En passant — capturing pawn must be on the 5th rank (White)
-            // or 4th rank (Black), adjacent to the double-pushed pawn,
-            // and on the SAME level (no cross-board en passant).
+            // or 4th rank (Black), and on the same or adjacent level as the
+            // ep target.  Same level = X-Y plane capture (file ± 1).
+            // Adjacent level = Y-Z plane capture (same file, level ± 1).
             if (st.epSquare != SQ_NONE) {
                 Rank epRank = (us == WHITE) ? RANK_5 : RANK_4;
-                if (rank_of(from) == epRank
-                    && level_of(from) == level_of(st.epSquare)) {
+                int level_diff = std::abs(int(level_of(from)) - int(level_of(st.epSquare)));
+                if (rank_of(from) == epRank && level_diff <= 1) {
                     Bitboard128 ep_bb = Bitboard128::from_square(st.epSquare);
                     Bitboard128 ep_atk = pawn_attacks(us, from) & ep_bb;
                     if (ep_atk.any())

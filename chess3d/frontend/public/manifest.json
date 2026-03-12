@@ -1,6 +1,6 @@
 {
-  "short_name": "React App",
-  "name": "Create React App Sample",
+  "short_name": "Chess 3D",
+  "name": "QuadLevel 3D Chess",
   "icons": [
     {
       "src": "favicon.ico",
