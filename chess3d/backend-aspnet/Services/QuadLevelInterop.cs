@@ -9,8 +9,8 @@
 //   engine.MakeMove("N1c3");         // algebraic notation
 //   string best = engine.BestMove(depth: 8, timeMs: 5000);
 //
-// Copy Stockfish_3D_Port.dll to your output directory,
-// or set <Content Include="path\to\Stockfish_3D_Port.dll"> CopyToOutputDirectory=PreserveNewest.
+// Copy QuadLevel_3D_Port.dll to your output directory,
+// or set <Content Include="path\to\QuadLevel_3D_Port.dll"> CopyToOutputDirectory=PreserveNewest.
 
 using System;
 using System.Runtime.InteropServices;
@@ -21,7 +21,7 @@ using System.Runtime.InteropServices;
 /// </summary>
 internal static partial class QuadLevelNative
 {
-    private const string DllName = "Stockfish_3D_Port";
+    private const string DllName = "QuadLevel_3D_Port";
 
     // Lifetime
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
