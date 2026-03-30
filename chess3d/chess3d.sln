@@ -1,0 +1,29 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "backend-aspnet", "backend-aspnet", "{85ED3591-0EBA-B5D7-092C-EA5B45972A07}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Chess3DBackend", "backend-aspnet\Chess3DBackend.csproj", "{5137A20A-4E0F-1C81-98F7-4CF22D14F281}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5137A20A-4E0F-1C81-98F7-4CF22D14F281}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5137A20A-4E0F-1C81-98F7-4CF22D14F281}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5137A20A-4E0F-1C81-98F7-4CF22D14F281}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5137A20A-4E0F-1C81-98F7-4CF22D14F281}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{5137A20A-4E0F-1C81-98F7-4CF22D14F281} = {85ED3591-0EBA-B5D7-092C-EA5B45972A07}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9AF016B0-6041-42A1-8088-8CB46A7181EF}
+	EndGlobalSection
+EndGlobal

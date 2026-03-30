@@ -1,0 +1,4 @@
+[DLL-VERSION] castle-fix-v4-verified-2026-03-03T10
+[SET-FEN] castlingRights=0xffff  fen=rnbr/pppp/4/4/4/4/PPPP/RNBR|bkqn/pppp/4/4/4/2N1/PPPP/BKQ1|nqkb/pp1p/4/2p1/2P1/4/PP1P/NQKB|rbnr/pppp/4/4/4/4/PPPP/RBNR b ffff - 0 2
+[BOOK] probe_opening_book: ply=3 us=1
+[BOOK-PLY3] ply=3 us=1 pawnA=0 pawnB=1 knightA=1 knightB=0 sq3(3,1,1)=0 sq3(4,1,1)=0 sq3(3,2,2)=1 sq3(4,2,2)=9 sq3(2,2,1)=2 sq3(2,1,2)=0

@@ -1,7 +1,7 @@
 /*
   QuadLevel Debug Harness — step through castle generation & search
   
-  Build (from stockfish-src directory):
+  Build (from engine-src directory):
     cl /std:c++20 /EHsc /Zi /Od /I. debug_castle.cpp /Fe:debug_castle.exe
 
   Usage:
@@ -10,17 +10,17 @@
     debug_castle.exe interactive              ← interactive FEN + move loop
 
   To debug in Visual Studio:
-    1) Open Stockfish_3D_Port.vcxproj
+    1) Open quadlevel_3D_Port.vcxproj
     2) Switch to Debug|Win32 (already configured as Console App)
-    3) Exclude main.cpp, stockfish_api.cpp from that config (right-click → Properties → Excluded From Build = Yes)
+    3) Exclude main.cpp, quadlevel_api.cpp from that config (right-click → Properties → Excluded From Build = Yes)
     4) Include this file in the project
     5) Set breakpoints in quadlevel_board.h castle generation (~line 503)
     6) Project → Properties → Debugging → Command Arguments → paste your FEN in quotes
     7) F5
 */
 
-// Only QuadLevel headers — no Stockfish dependencies needed
-#define STOCKFISH_DLL_EXPORTS  // prevent dllimport linkage issues
+// Only QuadLevel headers 
+#define QUADLEVEL_DLL_EXPORTS  // prevent dllimport linkage issues
 #include "quadlevel_board.h"
 #include "quadlevel_search.h"
 
