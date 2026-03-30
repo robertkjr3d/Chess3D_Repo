@@ -8,9 +8,9 @@
 
   <!-- Native DLL for P/Invoke — copied to output dir so the runtime can find it -->
   <ItemGroup> 
-    <Content Include="M:\Chess3D\Chess3D_Repo\Stockfish_3D_Port\x64\Release\Stockfish_3D_Port.dll">
+    <Content Include="M:\Chess3D\Chess3D_Repo\QuadLevel_3D_Port\x64\Release\quadLevel_3D_Port.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Stockfish_3D_Port.dll</Link>
+      <Link>quadLevel_3D_Port.dll</Link>
     </Content>
   </ItemGroup>
 

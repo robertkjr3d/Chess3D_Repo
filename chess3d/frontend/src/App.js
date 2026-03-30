@@ -133,7 +133,7 @@ function canPieceMoveTo(piece, tx, ty, tz, pieces) {
   return attacksSquareByPiece(piece, tx, ty, tz, pieces);
 }
 
-// ── FEN computation for Stockfish sync ──────────────────────────────────────
+// ── FEN computation for the engine sync ──────────────────────────────────────
 // Castle entries matching C++ CastleEntry tables (WhiteCastles[0..7], BlackCastles[0..7])
 // Positions are in frontend coords: x=row (0=rank8, 7=rank1), y=file, z=level
 const CASTLE_ENTRIES = [
@@ -1403,7 +1403,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             return next;
           } catch (e) { return prev; }
         });
-        // record raw coord move for Stockfish synchronously
+        // record raw coord move for the engine synchronously
         try {
           if (moverBefore && finalTarget && typeof finalTarget.x === 'number' && typeof finalTarget.y === 'number' && typeof finalTarget.z === 'number' && coordMoveHistoryRef) {
             const fromSq = `${moverBefore.z + 1}${String.fromCharCode(97 + moverBefore.y)}${8 - moverBefore.x}`;
@@ -1739,7 +1739,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       const [repetitionCount, setRepetitionCount] = useState(0); // threefold repetition tracking
         const [lastMove, setLastMove] = useState(null); // track last move for en-passant (double-step)
       const [aiSide, setAiSide] = useState(null);
-      // 'dumb' = JS negamax only | 'smart' = Stockfish depth 8 / 5s | 'smarter' = Stockfish depth 14 / 12s
+      // 'dumb' = JS negamax only | 'smart' = the engine depth 8 / 5s | 'smarter' = the engine depth 14 / 12s
       const [aiStrength, setAiStrength] = useState('smart');
       const aiStrengthRef = useRef('smart');
       useEffect(() => { aiStrengthRef.current = aiStrength; }, [aiStrength]);
@@ -1749,7 +1749,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       useEffect(() => { aiDelayRef.current = aiDelay; }, [aiDelay]);
       const [selectedPieceId, setSelectedPieceId] = useState(null);
       const [moveHistory, setMoveHistory] = useState([]); // array of { white: string|null, black: string|null }
-      const [coordMoveHistory, setCoordMoveHistory] = useState([]); // flat array of raw coord strings e.g. "2d82c6" — sent to Stockfish backend
+      const [coordMoveHistory, setCoordMoveHistory] = useState([]); // flat array of raw coord strings e.g. "2d82c6" — sent to the engine backend
       const [canvasKey, setCanvasKey] = useState(0);
       // Auto-show the game-over modal whenever the game ends.
       // Separated from gameOver so Dismiss closes the popup without re-enabling the AI.
@@ -1945,7 +1945,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
       };
       const prevPiecesRef = useRef(piecesState);
       const prevMoveHistoryRef = useRef(moveHistory);
-      const coordMoveHistoryRef = useRef([]); // ref copy so Stockfish timeout closure always sees latest
+      const coordMoveHistoryRef = useRef([]); // ref copy so the engine timeout closure always sees latest
       useEffect(() => { coordMoveHistoryRef.current = coordMoveHistory; }, [coordMoveHistory]);
       const statesHistoryRef = useRef([]); // stack of previous full states for take-back
 
@@ -3210,7 +3210,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
             console.log('applyMove: moveAppliedRef.current=', moveAppliedRef.current, 'notation=', finalNotationComputed); 
           } catch (e) {}
 
-          // Always record raw coord move for Stockfish — independent of notation/moveAppliedRef
+          // Always record raw coord move for the engine — independent of notation/moveAppliedRef
           // so the engine always gets the correct move list regardless of notation edge-cases
           try {
             if (moverBeforeSnap && finalTarget && typeof finalTarget.x === 'number' && typeof finalTarget.y === 'number' && typeof finalTarget.z === 'number') {
@@ -3285,7 +3285,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
           // restore full state
           try { setPiecesState(restored.piecesState || []); } catch (e) {}
           try { setMoveHistory(restored.moveHistory || []); } catch (e) {}
-          // restore coordMoveHistory so Stockfish replay stays in sync after take-back
+          // restore coordMoveHistory so the engine replay stays in sync after take-back
           try { const restoredCoord = restored.coordMoveHistory || []; coordMoveHistoryRef.current = restoredCoord.slice(); setCoordMoveHistory(restoredCoord); } catch (e) {}
           try { setCurrentTurn(restored.currentTurn || 'white'); } catch (e) {}
           try { setLastMove(restored.lastMove || null); } catch (e) {}
@@ -4329,8 +4329,8 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
               // Shadow outer aiSide so all existing logic below uses the correct acting side
               const aiSide = effectiveSide; // eslint-disable-line no-shadow
 
-              // ── Stockfish backend path ──────────────────────────────────────────
-              let stockfishAttempted = false;
+              // ── the engine backend path ──────────────────────────────────────────
+              let engineAttempted = false;
               if (aiStrengthRef.current !== 'dumb' && aiSide) {
                 try {
                   // Use raw coordinate move list (e.g. "2d82c6") — guaranteed parseable by C++ engine
@@ -4340,32 +4340,32 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                   // rebuild it by simulating from start using the stored algebraic notation.
                   const expectedHalfMoves = (moveHistory || []).reduce((s, e) => s + (e.white ? 1 : 0) + (e.black ? 1 : 0), 0);
                   if (coordMoveHistoryRef.current.length < expectedHalfMoves - 1) {
-                    console.log('Stockfish: coordMoveHistory out of sync (have', coordMoveHistoryRef.current.length, ', expected ~', expectedHalfMoves, ') — rebuilding...');
+                    console.log('Engine: coordMoveHistory out of sync (have', coordMoveHistoryRef.current.length, ', expected ~', expectedHalfMoves, ') — rebuilding...');
                     rebuildCoordMoveHistory();
                   }
 
                   const movesFlat = coordMoveHistoryRef.current.slice();
-                  console.log('Stockfish coord moves:', movesFlat);
+                  console.log('Engine coord moves:', movesFlat);
                   // Compute FEN from current board state — avoids castling/move-replay desync
                   const livePiecesForFen = prevPiecesRef.current || piecesState || [];
                   const fenStr = computeFen(livePiecesForFen, currentTurn, lastMove, (moveHistory || []).length);
-                  console.log('Stockfish FEN:', fenStr);
+                  console.log('Engine FEN:', fenStr);
                   // Smart AI: depth 8 / 5s | Smarter AI: depth 14 / 12s
                   const sfDepth = aiStrengthRef.current === 'smarter' ? 14 : 8;
                   const sfTimeMs = aiStrengthRef.current === 'smarter' ? 12000 : 5000;
                   const sfUrl = `${API_BASE_URL}/api/ai/bestmove`;
-                  console.log('Calling Stockfish at', sfUrl, 'fen:', fenStr);
+                  console.log('Calling Engine at', sfUrl, 'fen:', fenStr);
                   const sfResp = await fetch(sfUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ fen: fenStr, moves: movesFlat, depth: sfDepth, timeMs: sfTimeMs }),
                     signal: AbortSignal.timeout(sfTimeMs + 8000)
                   });
-                  console.log('Stockfish HTTP status:', sfResp.status);
+                  console.log('Engine HTTP status:', sfResp.status);
                   if (sfResp.ok) {
                     const sfResult = await sfResp.json();
-                    stockfishAttempted = true; // Stockfish responded — do NOT fall back to JS AI
-                    console.log('Stockfish result:', sfResult, 'searchDepth:', sfResult.searchDepth);
+                    engineAttempted = true; // Engine responded — do NOT fall back to JS AI
+                    console.log('Engine result:', sfResult, 'searchDepth:', sfResult.searchDepth);
                     // Parse LfileRank notation (e.g. "1a4") → internal {x,y,z}
                     const parseQL = (s) => {
                       const m = s && s.match(/^([1-4])([a-h])([1-8])$/);
@@ -4377,25 +4377,25 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                     // Log every piece that is on the from-square regardless of color, to diagnose lookup failures
                     const livePiecesAll = prevPiecesRef.current || piecesState || [];
                     const piecesAtFrom = fromCoord ? livePiecesAll.filter(p => p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z) : [];
-                    console.log('Stockfish lookup debug: fromCoord=', fromCoord, 'toCoord=', toCoord,
+                    console.log('Engine lookup debug: fromCoord=', fromCoord, 'toCoord=', toCoord,
                       'aiSide=', aiSide, 'livePieces.length=', livePiecesAll.length,
                       'piecesAtFromSquare=', piecesAtFrom);
                     if (toCoord) {
                       // Use prevPiecesRef.current — piecesState closure is stale inside setTimeout
                       const livePieces = livePiecesAll.length > 0 ? livePiecesAll : (piecesState || []);
                       let mover = null;
-                      // Find piece at source square — no color filter needed, Stockfish only returns moves for aiSide
+                      // Find piece at source square — no color filter needed, the engine only returns moves for aiSide
                       if (fromCoord) {
                         mover = livePieces.find(p =>
                           p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z
                         );
-                        if (mover) console.log('Stockfish: found mover by fromCoord', fromCoord, mover);
+                        if (mover) console.log('Engine: found mover by fromCoord', fromCoord, mover);
                       }
                       // Fallback: any legal move whose source AND destination both match
                       if (!mover) {
-                        console.warn('Stockfish: no piece at fromCoord', fromCoord, '— searching legal moves for toCoord', toCoord);
+                        console.warn('Engine: no piece at fromCoord', fromCoord, '— searching legal moves for toCoord', toCoord);
                         const allLegal = getAllLegalMoves(livePieces, aiSide) || [];
-                        console.log('Stockfish: legal moves for', aiSide, allLegal.length, 'moves');
+                        console.log('Engine: legal moves for', aiSide, allLegal.length, 'moves');
                         // First try: match both source and destination
                         let match = fromCoord
                           ? allLegal.find(mv =>
@@ -4445,36 +4445,36 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                                   rookFrom: { x: rx, y: ry, z: rz },
                                   rookTo
                                 }};
-                                console.log('Stockfish: castling detected via engine flag', enrichedTarget.castle);
+                                console.log('Engine: castling detected via engine flag', enrichedTarget.castle);
                               } else {
-                                console.warn('Stockfish: castling flagged but rook not found at', {x: rx, y: ry, z: rz});
+                                console.warn('Engine: castling flagged but rook not found at', {x: rx, y: ry, z: rz});
                               }
                             } else {
-                              console.warn('Stockfish: castling flagged but no rookFromMap entry for', mapKey);
+                              console.warn('Engine: castling flagged but no rookFromMap entry for', mapKey);
                             }
                           } catch (e) {
-                            console.warn('Stockfish: castle metadata construction failed', e);
+                            console.warn('Engine: castle metadata construction failed', e);
                           }
                         }
-                        if (aiPausedRef.current) { console.log('Stockfish: AI paused — suppressing move'); return; }
+                        if (aiPausedRef.current) { console.log('Engine: AI paused — suppressing move'); return; }
                         applyMove(mover.id, enrichedTarget);
-                        console.log('Stockfish move applied:', sfResult.raw, '→ piece', mover.t, mover.color, 'to', enrichedTarget);
+                        console.log('Engine move applied:', sfResult.raw, '→ piece', mover.t, mover.color, 'to', enrichedTarget);
                         return; // done — skip JS negamax
                       }
-                      console.warn('Stockfish: could not map move to piece, falling back to JS AI', sfResult, 'fromCoord:', fromCoord, 'toCoord:', toCoord);
+                      console.warn('Engine: could not map move to piece, falling back to JS AI', sfResult, 'fromCoord:', fromCoord, 'toCoord:', toCoord);
                     }
                   } else {
                     const errBody = await sfResp.text().catch(() => '(no body)');
-                    console.warn('Stockfish API returned', sfResp.status, '— body:', errBody, '— falling back to JS AI');
+                    console.warn('Engine API returned', sfResp.status, '— body:', errBody, '— falling back to JS AI');
                   }
                 } catch (sfErr) {
-                  console.warn('Stockfish call failed, falling back to JS AI:', sfErr);
+                  console.warn('Engine call failed, falling back to JS AI:', sfErr);
                 }
               }
-              // ── end Stockfish path ────────────────────────────────────────────
-              // If Stockfish responded (even if piece lookup failed), do not run JS AI
-              if (stockfishAttempted) {
-                console.warn('Stockfish responded but piece lookup failed — skipping JS AI to avoid override');
+              // ── end The Engine path ────────────────────────────────────────────
+              // If The Engine responded (even if piece lookup failed), do not run JS AI
+              if (engineAttempted) {
+                console.warn('Engine responded but piece lookup failed — skipping JS AI to avoid override');
                 return;
               }
 
