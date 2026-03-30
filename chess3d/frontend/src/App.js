@@ -5633,7 +5633,7 @@ function attacksSquareByPiece(piece, tx, ty, tz, pieces, lastMove) {
                 </>
               ) : (
                 <>
-                <button className="menu-button" onClick={() => { resetGame(); setAiSide(null); setGameStarted(false); setMobileMenuOpen(false); }}>
+                <button className="menu-button" onClick={() => { resetGame(); setAiSide(null); setGameStarted(false); if (isMobile) setMobileMenuOpen(true); else setMobileMenuOpen(false); }}>
                   Start a new game
                 </button>
               {aiSide && (
