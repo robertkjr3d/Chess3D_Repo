@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -128,19 +128,27 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\engine-src\debug_castle.cpp">
+    <ClCompile Include="..\engine-src\debug_castle.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="..\..\engine-src\quadlevel_api.cpp">
+    <ClCompile Include="..\engine-src\puzzle_miner.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\engine-src\quadlevel_api.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\engine-src\mate_in_2_generator.cpp" xmlns="" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\engine-src\quadlevel_board.h" />
-    <ClInclude Include="..\..\engine-src\quadlevel_search.h" />
-    <ClInclude Include="..\..\engine-src\quadlevel_types.h" />
-    <ClInclude Include="..\..\engine-src\quadlevel_api.h" />
+    <ClInclude Include="..\engine-src\quadlevel_board.h" />
+    <ClInclude Include="..\engine-src\quadlevel_search.h" />
+    <ClInclude Include="..\engine-src\quadlevel_types.h" />
+    <ClInclude Include="..\engine-src\quadlevel_api.h" />
+    <ClInclude Include="..\engine-src\mate_in_2_generator.h" xmlns="" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

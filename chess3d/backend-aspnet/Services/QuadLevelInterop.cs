@@ -1,4 +1,4 @@
-// QuadLevelInterop.cs � .NET 8.0 P/Invoke wrapper for Stockfish_3D_Port.dll
+// QuadLevelInterop.cs � .NET 8.0 P/Invoke wrapper for QuadLevel_3D_Port.dll
 //
 // Usage:
 //   using var engine = new QuadLevelEngine();
