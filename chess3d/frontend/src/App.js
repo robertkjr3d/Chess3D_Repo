@@ -18,6 +18,7 @@ import { GLOBAL_PIECE_SCALE, PIECE_ASPECT_RATIO, GHOST_SCALE_FACTOR, DRAG_LEVEL_
 import { parsePuzzleText, puzzleMoveMatches } from './utils/puzzles';
 import { DEFAULT_MATE_IN_TWO_PUZZLES_TEXT } from './data/mateInTwoPuzzles';
 import { QuadLevelBoard } from './components/Board';
+import { ShowPuzzleAnswer } from './components/ShowPuzzleAnswer';
 import { cloneAndColor, CanvasLogger, Pieces, Ghost } from './components/Pieces';
 import { createAiEngine } from './ai/engine';
 import { useAiOrchestration } from './hooks/useAiOrchestration';
@@ -93,6 +94,15 @@ function getCalcZoomDebugInfo(w, h) {
 
 function calcZoom(w, h) {
   return getCalcZoomDebugInfo(w, h).zoom;
+}
+
+function getQueryParams() {
+  const params = {};
+  window.location.search.replace(/[?&]+([^=&]+)=?([^&]*)?/gi, (match, key, value) => {
+    params[decodeURIComponent(key)] = value !== undefined ? decodeURIComponent(value) : '';
+    return match;
+  });
+  return params;
 }
 
 
@@ -1641,6 +1651,37 @@ function calcZoom(w, h) {
         return loadPuzzleAt(nextIndex);
       }, [puzzleSet, puzzleIndex, loadPuzzleAt]);
 
+      const getRandomPuzzleIndex = useCallback((puzzles, currentIndex = null) => {
+        if (!puzzles || puzzles.length === 0) return -1;
+        if (puzzles.length === 1) return 0;
+
+        let nextIndex = currentIndex;
+        while (nextIndex === currentIndex) {
+          nextIndex = Math.floor(Math.random() * puzzles.length);
+        }
+        return nextIndex;
+      }, []);
+
+      useEffect(() => {
+        const params = getQueryParams();
+        if (!('matein2' in params)) return;
+        if (!defaultPuzzleSet.length) return;
+
+        setPuzzleSet(defaultPuzzleSet);
+
+        let nextIndex;
+        if (params.matein2 === '' || params.matein2 === 'random') {
+          nextIndex = getRandomPuzzleIndex(defaultPuzzleSet);
+        } else {
+          const parsedIndex = Number(params.matein2);
+          nextIndex = Number.isFinite(parsedIndex)
+            ? Math.max(0, Math.min(defaultPuzzleSet.length - 1, Math.floor(parsedIndex)))
+            : getRandomPuzzleIndex(defaultPuzzleSet);
+        }
+
+        loadPuzzleAt(nextIndex, defaultPuzzleSet);
+      }, [defaultPuzzleSet, getRandomPuzzleIndex, loadPuzzleAt]);
+
       const importPuzzleFile = async (file) => {
         try {
           const text = await file.text();
@@ -1650,7 +1691,7 @@ function calcZoom(w, h) {
             return;
           }
           setPuzzleSet(puzzles);
-          loadPuzzleAt(0, puzzles);
+          loadPuzzleAt(getRandomPuzzleIndex(puzzles), puzzles);
           alert(`Loaded ${puzzles.length} puzzles`);
         } catch (e) {
           alert(`Puzzle import failed: ${e.message || e}`);
@@ -1873,6 +1914,9 @@ function calcZoom(w, h) {
               setGameStarted(true);
               return;
             }
+            if (params.has('matein2')) {
+              return;
+            }
             const id = localStorage.getItem(SERVER_ID_KEY);
             if (id) {
               suppressAutoSaveRef.current = true;
@@ -2060,7 +2104,7 @@ function calcZoom(w, h) {
                   <button className="menu-button" onClick={() => { resetGame(); setGameMode('standard'); setAiSide('both'); setGameStarted(true); setMobileMenuOpen(false); }}>
                     Watch AI vs AI
                   </button>
-                  <button className="menu-button" onClick={() => { setPuzzleSet(defaultPuzzleSet); loadPuzzleAt(0, defaultPuzzleSet); setMobileMenuOpen(false); }}>
+                  <button className="menu-button" onClick={() => { setPuzzleSet(defaultPuzzleSet); loadPuzzleAt(getRandomPuzzleIndex(defaultPuzzleSet), defaultPuzzleSet); setMobileMenuOpen(false); }}>
                     Mate in two puzzles
                   </button>
                   <hr />
@@ -2100,6 +2144,7 @@ function calcZoom(w, h) {
                   <button className="menu-button" onClick={() => { loadPuzzleAt(puzzleIndex); setMobileMenuOpen(false); }}>
                     Restart Puzzle
                   </button>
+                  <ShowPuzzleAnswer activePuzzle={activePuzzle} />
                   <button className="menu-button" style={{ marginTop: 6 }} onClick={() => { loadRandomPuzzle(); setMobileMenuOpen(false); }}>
                     Next Puzzle
                   </button>
@@ -2130,7 +2175,7 @@ function calcZoom(w, h) {
                   try {
                     ['camPos','camTarget','camDefaultPos','camDefaultTarget'].forEach(k => localStorage.removeItem(k));
                     const isMob = window.innerWidth <= 480;
-                    const newPos = isMob ? [0, 7, -10] : [0, 5, -10];  // matches initial camPos default
+                    const newPos = isMob ? [0, 6.5, -10] : [0, 5, -10];  // matches initial camPos default
                     const newTarget = isMob ? [0, 3.5, 0] : [0, 1.7, 0];
                     setCamPos(newPos);
                     setCamTarget(newTarget);

@@ -7,6 +7,37 @@
 
 namespace QuadLevel {
 
+namespace {
+
+static bool is_mate_score(Value score, int pliesTolerance = 4) {
+    return score >= VALUE_MATE - pliesTolerance;
+}
+
+static bool move_forces_mate_in_two(Position3D& root, const Move3D& first, int time_limit_ms) {
+    Position3D afterFirst = root;
+    afterFirst.do_move(first); // defender to move
+
+    auto replies = afterFirst.generate_legal_moves();
+    if (replies.empty())
+        return false; // mate-in-1 or stalemate, not mate-in-2
+
+    // For every defender reply, attacker must have mate-in-1.
+    const int verifyMs = std::clamp(time_limit_ms, 100, 500);
+    for (const auto& r : replies) {
+        Position3D afterReply = afterFirst;
+        afterReply.do_move(r); // attacker to move
+
+        Search3D local;
+        SearchResult rr = local.search(afterReply, 3, verifyMs);
+        if (!rr.best_move.is_ok() || !is_mate_score(rr.score, 2))
+            return false;
+    }
+
+    return true;
+}
+
+} // namespace
+
 MateInTwoGenerator::MateInTwoGenerator(size_t cache_limit)
     : max_cache_size(cache_limit),
       rng([&]() {
@@ -203,29 +234,37 @@ Position3D MateInTwoGenerator::generate_random_position(int depth) {
 
 bool MateInTwoGenerator::verify_mate_in_two(const Position3D& pos, Move3D& out_first_move,
                                            int time_limit_ms) {
-    // Create a working copy for search
+    // Quick gate: position should evaluate as mate-in-2 candidate first.
     Position3D work_pos = pos;
-
-    // Search at depth 5 (should find mate in 2 by move 1.5)
     SearchResult result = verifier.search(work_pos, 5, time_limit_ms);
 
     if (!result.best_move.is_ok())
         return false;
 
-    // Check if best move is a mate-in-2
-    // A mate-in-2 for the side to move means:
-    // - Best score is >= VALUE_MATE - 3 (mate in ~3 plies)
-    // - Depth reached should be at least 4
-
     constexpr Value MATE_THRESHOLD = VALUE_MATE - 4;
-
     if (result.score < MATE_THRESHOLD)
         return false;
 
-    if (result.depth < 4)
+    // Unique solution requirement:
+    // exactly one legal first move must force mate-in-2.
+    auto legal = pos.generate_legal_moves();
+    int winningFirstMoves = 0;
+    Move3D unique = Move3D::none();
+
+    for (const auto& m : legal) {
+        Position3D rootCopy = pos;
+        if (move_forces_mate_in_two(rootCopy, m, time_limit_ms)) {
+            ++winningFirstMoves;
+            unique = m;
+            if (winningFirstMoves > 1)
+                return false;
+        }
+    }
+
+    if (winningFirstMoves != 1)
         return false;
 
-    out_first_move = result.best_move;
+    out_first_move = unique;
     return true;
 }
 

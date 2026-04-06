@@ -105,6 +105,34 @@ static bool detect_mate_in_2(Position3D& pos, Search3D& verifier, MinedPuzzle& o
     return true;
 }
 
+static bool parse_puzzle_line(const std::string& line,
+                              std::string& fenOut,
+                              std::string& coordOut,
+                              std::string& algOut,
+                              char& sideOut) {
+    // Format: fen|solution_coord|solution_algebraic|side
+    // Important: fen itself contains '|' separators between levels,
+    // so parse from the right.
+    size_t p3 = line.rfind('|');
+    if (p3 == std::string::npos || p3 + 1 >= line.size())
+        return false;
+
+    size_t p2 = line.rfind('|', p3 - 1);
+    if (p2 == std::string::npos)
+        return false;
+
+    size_t p1 = line.rfind('|', p2 - 1);
+    if (p1 == std::string::npos)
+        return false;
+
+    fenOut   = line.substr(0, p1);
+    coordOut = line.substr(p1 + 1, p2 - p1 - 1);
+    algOut   = line.substr(p2 + 1, p3 - p2 - 1);
+    sideOut  = line[p3 + 1];
+
+    return !fenOut.empty() && !coordOut.empty() && !algOut.empty();
+}
+
 static void load_existing_fens(const std::string& path, std::unordered_set<std::string>& seen) {
     std::ifstream in(path);
     if (!in)
@@ -114,10 +142,13 @@ static void load_existing_fens(const std::string& path, std::unordered_set<std::
     while (std::getline(in, line)) {
         if (line.empty())
             continue;
-        size_t sep = line.find('|');
-        if (sep == std::string::npos)
+
+        std::string fen, coord, alg;
+        char side = '?';
+        if (!parse_puzzle_line(line, fen, coord, alg, side))
             continue;
-        seen.insert(line.substr(0, sep));
+
+        seen.insert(fen);
     }
 }
 
@@ -190,7 +221,127 @@ static bool passes_solution_move_filter(const Position3D& pos, Move3D bestMove, 
     return false;
 }
 
+static bool move_forces_mate_in_two(Position3D& root, const Move3D& first, Search3D& verifier) {
+    Position3D afterFirst = root;
+    afterFirst.do_move(first); // defender to move
+
+    auto replies = afterFirst.generate_legal_moves();
+    if (replies.empty())
+        return false;
+
+    for (const auto& r : replies) {
+        Position3D afterReply = afterFirst;
+        afterReply.do_move(r); // attacker to move
+
+        SearchResult rr = verifier.search(afterReply, 3, 350);
+        if (!rr.best_move.is_ok() || rr.score < VALUE_MATE - 2)
+            return false;
+    }
+
+    return true;
+}
+
+static bool find_unique_mate2_solution(Position3D& pos, Search3D& verifier, Move3D& outUnique) {
+    auto legal = pos.generate_legal_moves();
+    int winning = 0;
+    Move3D candidate = Move3D::none();
+
+    for (const auto& m : legal) {
+        Position3D copy = pos;
+        if (move_forces_mate_in_two(copy, m, verifier)) {
+            ++winning;
+            candidate = m;
+            if (winning > 1)
+                return false;
+        }
+    }
+
+    if (winning == 1) {
+        outUnique = candidate;
+        return true;
+    }
+
+    return false;
+}
+
+static bool cull_file_for_unique_solutions(const std::string& inputPath, const std::string& outputPath) {
+    std::ifstream in(inputPath);
+    if (!in)
+        return false;
+
+    std::ofstream out(outputPath, std::ios::trunc);
+    if (!out)
+        return false;
+
+    Search3D verifier;
+
+    std::string line;
+    int total = 0;
+    int kept = 0;
+    int dropped = 0;
+    int badFormat = 0;
+    int badFen = 0;
+
+    while (std::getline(in, line)) {
+        if (line.empty())
+            continue;
+
+        ++total;
+
+        std::string fen, coord, alg;
+        char side = '?';
+        if (!parse_puzzle_line(line, fen, coord, alg, side)) {
+            ++dropped;
+            ++badFormat;
+            continue;
+        }
+
+        Position3D pos;
+        if (!pos.set_fen(fen)) {
+            ++dropped;
+            ++badFen;
+            continue;
+        }
+
+        Move3D unique = Move3D::none();
+        if (!find_unique_mate2_solution(pos, verifier, unique)) {
+            ++dropped;
+            continue;
+        }
+
+        out << fen << '|'
+            << move_to_string(unique) << '|'
+            << pos.move_to_algebraic(unique) << '|'
+            << (pos.side_to_move() == WHITE ? 'w' : 'b')
+            << '\n';
+        ++kept;
+    }
+
+    out.flush();
+    std::printf("[CULL] total=%d kept=%d dropped=%d badFormat=%d badFen=%d output=%s\n",
+                total, kept, dropped, badFormat, badFen, outputPath.c_str());
+    return true;
+}
+
 int main(int argc, char* argv[]) {
+    // Culling mode: re-validate an existing puzzle file and keep only
+    // positions with a unique mate-in-2 first move.
+    if (argc >= 2 && std::string(argv[1]) == "cull") {
+        std::string inPath = (argc >= 3) ? argv[2] : "mate2_puzzles.txt";
+        std::string outPath = (argc >= 4) ? argv[3] : "mate2_puzzles.culled.txt";
+
+        std::printf("=== QuadLevel Mate-in-2 Culler ===\n");
+        std::printf("Input:  %s\n", inPath.c_str());
+        std::printf("Output: %s\n", outPath.c_str());
+
+        if (!cull_file_for_unique_solutions(inPath, outPath)) {
+            std::fprintf(stderr, "ERROR: cull failed.\n");
+            return 1;
+        }
+
+        return 0;
+    }
+
     int games = 200;
     std::string outPath = "mate2_puzzles.txt";
     bool randomizedSelfplay = true;
@@ -274,6 +425,12 @@ int main(int argc, char* argv[]) {
             MinedPuzzle p;
             if (detect_mate_in_2(pos, verifier, p, filterMode)) {
                 ++candidatesMate2;
+
+                // Enforce unique mate-in-2 first move.
+                Move3D unique = Move3D::none();
+                if (!find_unique_mate2_solution(pos, verifier, unique))
+                    continue;
+                p.best = unique;
 
                 // Track mate-in-1 candidates for diagnostics (only meaningful in exact mode)
                 if (filterMode == FilterMode::ExactMate2 && is_mate_in_1(pos, verifier)) {
