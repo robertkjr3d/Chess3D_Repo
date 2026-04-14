@@ -11,6 +11,12 @@ function normalizeSide(value) {
   return side === 'w' || side === 'b' ? side : '';
 }
 
+function extractPromotionPiece(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/=\s*([qrbn])/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
 export function parsePuzzleLine(line, index = 0) {
   const raw = String(line || '').trim();
   if (!raw) return null;
@@ -63,7 +69,15 @@ export function puzzleMoveMatches(puzzle, coordMove, notation) {
   const normalizedCoord = normalizeCoordMove(coordMove);
   const normalizedNotation = normalizeNotation(notation);
 
-  if (puzzle.answerCoord && normalizedCoord === puzzle.answerCoord) return true;
+  const expectedPromotion =
+    extractPromotionPiece(puzzle.answerCoord) || extractPromotionPiece(puzzle.answerNotation);
+  const playedPromotion =
+    extractPromotionPiece(normalizedCoord) || extractPromotionPiece(normalizedNotation);
+
+  if (puzzle.answerCoord && normalizedCoord === puzzle.answerCoord) {
+    if (!expectedPromotion) return true;
+    return playedPromotion === expectedPromotion;
+  }
   if (puzzle.answerNotation && normalizedNotation === puzzle.answerNotation) return true;
   return false;
 }

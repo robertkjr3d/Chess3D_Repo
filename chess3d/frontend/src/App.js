@@ -18,7 +18,7 @@ import { GLOBAL_PIECE_SCALE, PIECE_ASPECT_RATIO, GHOST_SCALE_FACTOR, DRAG_LEVEL_
 import { parsePuzzleText, puzzleMoveMatches } from './utils/puzzles';
 import { DEFAULT_MATE_IN_TWO_PUZZLES_TEXT } from './data/mateInTwoPuzzles';
 import { QuadLevelBoard } from './components/Board';
-import { ShowPuzzleAnswer } from './components/ShowPuzzleAnswer';
+// ShowPuzzleAnswer replaced by unified hint button
 import { cloneAndColor, CanvasLogger, Pieces, Ghost } from './components/Pieces';
 import { createAiEngine } from './ai/engine';
 import { useAiOrchestration } from './hooks/useAiOrchestration';
@@ -128,6 +128,18 @@ function getQueryParams() {
       const [moveHistory, setMoveHistory] = useState([]); // array of { white: string|null, black: string|null }
       const [coordMoveHistory, setCoordMoveHistory] = useState([]); // flat array of raw coord strings e.g. "2d82c6" â€” sent to the engine backend
       const [canvasKey, setCanvasKey] = useState(0);
+      const [hintSquares, setHintSquares] = useState(null); // { from: {x,y,z}, to: {x,y,z} } | null
+      const [hintText, setHintText] = useState(null); // answer text shown alongside hint (puzzle mode)
+      const [hintVisible, setHintVisible] = useState(false);
+      const [hintThinking, setHintThinking] = useState(false);
+      const hintRequestVersionRef = useRef(0); // used to ignore stale async hint computations
+      const clearHintUi = useCallback(() => {
+        hintRequestVersionRef.current += 1;
+        setHintSquares(null);
+        setHintText(null);
+        setHintVisible(false);
+        setHintThinking(false);
+      }, []);
       const [gameMode, setGameMode] = useState('standard');
       const [puzzleSet, setPuzzleSet] = useState([]);
       const [puzzleIndex, setPuzzleIndex] = useState(0);
@@ -135,6 +147,7 @@ function getQueryParams() {
       const [puzzleAttempted, setPuzzleAttempted] = useState(false);
       const [puzzleSolved, setPuzzleSolved] = useState(false);
       const [puzzleStatus, setPuzzleStatus] = useState('');
+      const [showPuzzleCompleteModal, setShowPuzzleCompleteModal] = useState(false);
       const defaultPuzzleSet = useMemo(() => parsePuzzleText(DEFAULT_MATE_IN_TWO_PUZZLES_TEXT), []);
       // Auto-show the game-over modal whenever the game ends.
       // Separated from gameOver so Dismiss closes the popup without re-enabling the AI.
@@ -219,13 +232,14 @@ function getQueryParams() {
       const pointerDownWasSelectedRef = useRef(false);
       const groupRef = useRef();
       const sceneScale = 0.470;
+      const publicAssetBase = process.env.PUBLIC_URL || '';
       // load models once at App level and pass to children
-      const kingGltf = useGLTF('/models/King_small.glb');
-      const pawnGltf = useGLTF('/models/pawn_small.glb');
-      const knightGltf = useGLTF('/models/knight_small.glb');
-      const bishopGltf = useGLTF('/models/bishop_small.glb');
-      const rookGltf = useGLTF('/models/rook_small.glb');
-      const queenGltf = useGLTF('/models/queen_small.glb');
+      const kingGltf = useGLTF(`${publicAssetBase}/models/King_small.glb`);
+      const pawnGltf = useGLTF(`${publicAssetBase}/models/pawn_small.glb`);
+      const knightGltf = useGLTF(`${publicAssetBase}/models/knight_small.glb`);
+      const bishopGltf = useGLTF(`${publicAssetBase}/models/bishop_small.glb`);
+      const rookGltf = useGLTF(`${publicAssetBase}/models/rook_small.glb`);
+      const queenGltf = useGLTF(`${publicAssetBase}/models/queen_small.glb`);
 
       // build a cache of normalized clones per piece type + color so ghost and piece share same object
       const clones = useMemo(() => {
@@ -325,6 +339,7 @@ function getQueryParams() {
           setGameOver(false);
           setGameWinner(null);
           setShowGameOverModal(false);
+          setShowPuzzleCompleteModal(false);
           setStatusMessage('');
           setBoardFlipped(false);
           setHalfMoveClock(0);
@@ -337,6 +352,7 @@ function getQueryParams() {
           setPuzzleAttempted(false);
           setPuzzleSolved(false);
           setPuzzleStatus('');
+          clearHintUi();
         } catch (e) { console.debug('resetGame error', e); }
       };
       const prevPiecesRef = useRef(piecesState);
@@ -657,7 +673,20 @@ function getQueryParams() {
           if (!isMate) {
             setPuzzleStatus('Not a mate in 2 path.');
           } else {
-            setPuzzleStatus('Correct move.');
+            const winner = mover.color;
+            const winnerLabel = winner.charAt(0).toUpperCase() + winner.slice(1);
+            if (searchStateRef.current) searchStateRef.current.cancelled = true;
+            if (aiTimeoutRef.current.id) {
+              clearTimeout(aiTimeoutRef.current.id);
+              aiTimeoutRef.current = { id: null, moveCount: null };
+            }
+            setAiThinking(false);
+            setPuzzleStatus('Correct move. Checkmate!');
+            setGameWinner(winner);
+            setStatusMessage(`Checkmate: ${winnerLabel} wins`);
+            setGameOver(true);
+            setShowGameOverModal(true);
+            setShowPuzzleCompleteModal(true);
           }
         } catch (e) {
           console.debug('handlePuzzleHumanMove second move evaluation failed', e);
@@ -689,11 +718,88 @@ function getQueryParams() {
         searchStateRef,
       ]);
 
+      // Toggle helper: puzzle pre-attempt shows answer, post-attempt switches to normal hint suggestion.
+      const toggleHint = useCallback(() => {
+        if (hintThinking) return;
+        if (hintVisible) {
+          clearHintUi();
+          return;
+        }
+        const requestVersion = hintRequestVersionRef.current + 1;
+        hintRequestVersionRef.current = requestVersion;
+        setHintVisible(true);
+        setHintThinking(true);
+        const usePuzzleAnswerMode = gameMode === 'puzzle' && activePuzzle && !puzzleAttempted;
+        const parseCoordStr = (s) => ({
+          z: parseInt(s[0], 10) - 1,
+          y: s.charCodeAt(1) - 97,
+          x: 8 - parseInt(s[2], 10)
+        });
+        // Yield one frame so the Thinking UI can render before expensive hint ordering starts.
+        setTimeout(() => {
+          try {
+            if (requestVersion !== hintRequestVersionRef.current) return;
+            if (usePuzzleAnswerMode) {
+              const raw = activePuzzle.answerCoord || '';
+              const clean = raw.replace(/=\s*[qrbn]/i, '').trim();
+              if (clean.length >= 6) {
+                setHintSquares({ from: parseCoordStr(clean.slice(0, 3)), to: parseCoordStr(clean.slice(3, 6)) });
+              }
+              const txt = activePuzzle.solution || activePuzzle.answerNotation || activePuzzle.answerCoord || null;
+              setHintText(txt);
+              return;
+            }
+
+            const findHintForSide = (side) => {
+              if (!side) return null;
+              const legal = getAllLegalMoves(piecesState, side) || [];
+              if (!legal.length) return null;
+              let ordered = legal;
+              try {
+                const ranked = orderMoves(legal, piecesState, side);
+                if (Array.isArray(ranked) && ranked.length) ordered = ranked;
+              } catch (e) {
+                // Fallback to first legal move if ordering fails.
+              }
+              const best = ordered[0];
+              if (!best) return null;
+              const mover = (piecesState || []).find(p => p.id === best.moverId);
+              if (!mover) return null;
+              return { from: { x: mover.x, y: mover.y, z: mover.z }, to: { x: best.x, y: best.y, z: best.z } };
+            };
+
+            const preferredSide = (gameMode === 'puzzle' && puzzleAttempted && puzzlePlayerSide)
+              ? puzzlePlayerSide
+              : currentTurn;
+            const sideCandidates = [preferredSide, currentTurn, puzzlePlayerSide, 'white', 'black']
+              .filter((v, i, arr) => v && arr.indexOf(v) === i);
+
+            let nextHint = null;
+            for (const side of sideCandidates) {
+              nextHint = findHintForSide(side);
+              if (nextHint) break;
+            }
+            if (nextHint) {
+              setHintSquares(nextHint);
+            } else {
+              setHintVisible(false);
+            }
+            setHintText(null);
+          } finally {
+            if (requestVersion === hintRequestVersionRef.current) {
+              setHintThinking(false);
+            }
+          }
+        }, 0);
+      }, [hintVisible, hintThinking, gameMode, activePuzzle, puzzleAttempted, puzzlePlayerSide, piecesState, currentTurn, getAllLegalMoves, orderMoves, clearHintUi]);
+
       // helper: perform a move programmatically (moverId + target)
       const applyMove = useCallback((moverId, finalTarget) => {
         try { console.debug('applyMove enter', { moverId, finalTarget, moveLock: moveLockRef.current }); } catch (e) {}
         if (moveLockRef.current) { try { console.debug('applyMove early return: moveLock active', { moverId }); } catch (e) {} return; }
         moveLockRef.current = true;
+        // Clear any displayed hint when a move is played
+        clearHintUi();
         try {
           // compute stable snapshot and notation BEFORE mutating state to avoid races
           const snapPieces = (prevPiecesRef.current && prevPiecesRef.current.length) ? prevPiecesRef.current : (piecesState || []);
@@ -722,6 +828,37 @@ function getQueryParams() {
             } else {
               setPuzzleSolved(true);
               setPuzzleStatus('Correct move.');
+            }
+          }
+
+          if (gameMode === 'puzzle' && activePuzzle && puzzleAttempted && puzzleSolved && moverBeforeSnap && moverBeforeSnap.color === puzzlePlayerSide) {
+            try {
+              const nextPieces = simulateMove(snapPieces, moverId, finalTarget);
+              const opponent = moverBeforeSnap.color === 'white' ? 'black' : 'white';
+              const opponentInCheck = isAnyKingInCheck(nextPieces, opponent);
+              const opponentLegalMoves = getAllLegalMoves(nextPieces, opponent) || [];
+              const isMate = opponentInCheck && opponentLegalMoves.length === 0;
+
+              if (!isMate) {
+                setPuzzleStatus('Not a mate in 2 path.');
+              } else {
+                const winner = moverBeforeSnap.color;
+                const winnerLabel = winner.charAt(0).toUpperCase() + winner.slice(1);
+                if (searchStateRef.current) searchStateRef.current.cancelled = true;
+                if (aiTimeoutRef.current.id) {
+                  clearTimeout(aiTimeoutRef.current.id);
+                  aiTimeoutRef.current = { id: null, moveCount: null };
+                }
+                setAiThinking(false);
+                setPuzzleStatus('Correct move. Checkmate!');
+                setGameWinner(winner);
+                setStatusMessage(`Checkmate: ${winnerLabel} wins`);
+                setGameOver(true);
+                setShowGameOverModal(true);
+                setShowPuzzleCompleteModal(true);
+              }
+            } catch (e) {
+              console.debug('applyMove puzzle mate evaluation failed', e);
             }
           }
 
@@ -895,7 +1032,7 @@ function getQueryParams() {
         } finally {
           moveLockRef.current = false;
         }
-      }, [piecesState, setPiecesState, setMoveHistory, setCoordMoveHistory, setSelectedPieceId, setCurrentTurn, setLastMove, setHalfMoveClock, pushStateSnapshot, generateMoveNotation, moveHistory, currentTurn, gameMode, puzzleAttempted, puzzleSolved, activePuzzle, puzzlePlayerSide]);
+      }, [piecesState, setPiecesState, setMoveHistory, setCoordMoveHistory, setSelectedPieceId, setCurrentTurn, setLastMove, setHalfMoveClock, pushStateSnapshot, generateMoveNotation, moveHistory, currentTurn, gameMode, puzzleAttempted, puzzleSolved, activePuzzle, puzzlePlayerSide, clearHintUi]);
 
       // take-back: undo last ply (or last two plies if playing against AI)
       const takeBack = useCallback(() => {
@@ -1178,8 +1315,9 @@ function getQueryParams() {
             setGameOver(true);
             if (sideInCheck) {
               const winner = sideToMove === 'white' ? 'black' : 'white';
+              const winnerLabel = winner.charAt(0).toUpperCase() + winner.slice(1);
               setGameWinner(winner);
-              setStatusMessage(`${winner.charAt(0).toUpperCase() + winner.slice(1)} wins!`);
+              setStatusMessage(`Checkmate: ${winnerLabel} wins`);
             } else {
               setGameWinner(null);
               setStatusMessage('Draw: stalemate');
@@ -1616,12 +1754,15 @@ function getQueryParams() {
           setGameOver(false);
           setGameWinner(null);
           setShowGameOverModal(false);
+          setShowPuzzleCompleteModal(false);
           setStatusMessage('');
+          clearHintUi();
           setBoardFlipped(humanSide === 'black');
           setHalfMoveClock(parsed.halfMoveClock || 0);
           setRepetitionCount(0);
           setAiPaused(false);
           setAiThinking(false);
+          setHintThinking(false);
           setViewIndex(null);
           setViewedPieces(null);
           setGameMode('puzzle');
@@ -1637,7 +1778,7 @@ function getQueryParams() {
           alert(`Puzzle load failed: ${e.message || e}`);
           return false;
         }
-      }, [puzzleSet]);
+      }, [puzzleSet, clearHintUi]);
 
       const loadRandomPuzzle = useCallback(() => {
         const puzzles = puzzleSet;
@@ -2028,6 +2169,7 @@ function getQueryParams() {
       const ptAtBeginning = viewIndex === 0;
       const ptShowBack = ptCanPlay && ptSnapLen > 0 && !ptAtBeginning;
       const ptShowForward = ptCanPlay && !ptAtLive;
+      const boardWaitingForSelection = !gameStarted;
       const ptBtnBase = {
         background: 'rgba(30,30,30,0.85)', color: '#fff',
         border: '1.5px solid rgba(255,255,255,0.4)', borderRadius: '50%',
@@ -2139,12 +2281,38 @@ function getQueryParams() {
                 </div>
               )}
               <hr />
+              {/* Unified hint button — appears in all game modes while game is active */}
+              {!gameOver && (
+                <>
+                  <button
+                    className="menu-button"
+                    style={{ background: hintVisible ? '#fef9c3' : undefined, color: hintVisible ? '#854d0e' : undefined, fontWeight: hintVisible ? 'bold' : undefined }}
+                    onClick={() => { toggleHint(); }}
+                    disabled={hintThinking}
+                  >
+                    {hintThinking
+                      ? 'Thinking...'
+                      : hintVisible
+                      ? (gameMode === 'puzzle' && !puzzleAttempted ? 'Hide Answer' : 'Hide Hint')
+                      : (gameMode === 'puzzle' && !puzzleAttempted ? 'Show Answer' : 'Show Hint')}
+                  </button>
+                  {hintThinking && (
+                    <div style={{ marginTop: 4, fontSize: 12, color: '#d1d5db', background: '#1f2937', borderRadius: 4, padding: '6px 10px', border: '1px solid #374151' }}>
+                      Thinking... computing best suggestion
+                    </div>
+                  )}
+                  {hintSquares && hintText && (
+                    <div style={{ marginTop: 4, fontSize: 13, color: '#1d4ed8', background: '#e0e7ff', borderRadius: 4, padding: '6px 10px', wordBreak: 'break-word' }}>
+                      <b>Solution:</b> {hintText}
+                    </div>
+                  )}
+                </>
+              )}
               {gameMode === 'puzzle' ? (
                 <>
-                  <button className="menu-button" onClick={() => { loadPuzzleAt(puzzleIndex); setMobileMenuOpen(false); }}>
+                  <button className="menu-button" style={{ marginTop: 6 }} onClick={() => { loadPuzzleAt(puzzleIndex); setMobileMenuOpen(false); }}>
                     Restart Puzzle
                   </button>
-                  <ShowPuzzleAnswer activePuzzle={activePuzzle} />
                   <button className="menu-button" style={{ marginTop: 6 }} onClick={() => { loadRandomPuzzle(); setMobileMenuOpen(false); }}>
                     Next Puzzle
                   </button>
@@ -2360,7 +2528,7 @@ function getQueryParams() {
               </div>
             )}
           </aside>
-          <main className="main">
+          <main className={`main ${boardWaitingForSelection ? 'main-idle' : ''}`}>
             {/* â”€â”€ AI Thinking indicator â”€â”€ */}
             {aiThinking && aiSide !== 'both' && (
               <div style={{
@@ -2401,9 +2569,17 @@ function getQueryParams() {
                 )}
               </>
             )}
+            {boardWaitingForSelection && (
+              <div className="idle-board-overlay" aria-hidden="true">
+                <div className="idle-board-overlay-card">
+                  Select a mode from the menu to begin
+                </div>
+              </div>
+            )}
             <Canvas
               key={canvasKey}
-              className="canvas"
+              className={`canvas ${boardWaitingForSelection ? 'canvas-idle' : ''}`}
+              style={{ pointerEvents: boardWaitingForSelection ? 'none' : 'auto' }}
               orthographic={true}
               camera={{ position: camPos, zoom: calcZoom(
                 (() => { try { const r = document.querySelector('.main')?.getBoundingClientRect(); return r && r.width > 10 ? r.width : window.innerWidth; } catch(e) { return window.innerWidth; } })(),
@@ -2559,7 +2735,7 @@ function getQueryParams() {
               <BoardBoundsGuard />
               <directionalLight position={[5, 12, 5]} intensity={0.9} />
               <group ref={groupRef} scale={sceneScale} position={window.innerWidth <= 480 ? [-0.05, -0.4, 0] : [0, 0, 0]}>
-                <QuadLevelBoard flipBoard={boardFlipped || ((currentTurn === 'black') && !aiSide)} lastMove={lastMove} />
+                <QuadLevelBoard flipBoard={boardFlipped || ((currentTurn === 'black') && !aiSide)} lastMove={lastMove} hintSquares={hintSquares} />
                 <Pieces
                   piecesState={piecesState}
                   setPiecesState={setPiecesState}
@@ -2608,6 +2784,7 @@ function getQueryParams() {
                     boardFlipped={boardFlipped}
                     coordMoveHistoryRef={coordMoveHistoryRef}
                     setCoordMoveHistory={setCoordMoveHistory}
+                    onBeforeUserMove={clearHintUi}
                     onPuzzleHumanMove={handlePuzzleHumanMove}
                     inHistoryView={viewIndex !== null}
                     displayPiecesOverride={viewedPieces}
@@ -2684,7 +2861,7 @@ function getQueryParams() {
         ) : null}
 
         {/* Game Over modal â€” appears on checkmate, stalemate, draw, or resignation */}
-        {showGameOverModal && gameOver && (() => {
+        {((gameMode === 'puzzle' && showPuzzleCompleteModal) || (gameMode !== 'puzzle' && showGameOverModal && gameOver)) && (() => {
           let heading, sub, color;
           const msg = (statusMessage || '').toLowerCase();
           if (msg.includes('checkmate')) {
@@ -2720,6 +2897,7 @@ function getQueryParams() {
                       if (gameMode === 'puzzle') {
                         loadRandomPuzzle();
                         setShowGameOverModal(false);
+                        setShowPuzzleCompleteModal(false);
                         setMobileMenuOpen(false);
                       } else {
                         resetGame();
@@ -2733,7 +2911,10 @@ function getQueryParams() {
                     style={{ padding: '10px 20px', borderRadius: 6, background: '#e5e7eb', color: '#111', border: 'none', fontWeight: 'bold', fontSize: 14, cursor: 'pointer' }}
                   >{gameMode === 'puzzle' ? 'Next Puzzle' : 'New Game'}</button>
                   <button
-                    onClick={() => setShowGameOverModal(false)}
+                    onClick={() => {
+                      setShowGameOverModal(false);
+                      setShowPuzzleCompleteModal(false);
+                    }}
                     style={{ padding: '10px 20px', borderRadius: 6, background: '#374151', color: '#fff', border: 'none', fontWeight: 'bold', fontSize: 14, cursor: 'pointer' }}
                   >Dismiss</button>
                 </div>

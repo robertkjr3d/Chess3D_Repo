@@ -47,7 +47,7 @@ export function CanvasLogger({ canvasKey }) {
 }
 
 
-export function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped, coordMoveHistoryRef, setCoordMoveHistory, onPuzzleHumanMove, inHistoryView, displayPiecesOverride }) {
+export function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelectedPieceId, isDragging, dragPoint, setIsDragging, setDragPoint, dragPointWorld, setDragPointWorld, setPointerActive, controlsRef, pointerDownRef, pointerStartRef, pointerStartScreenRef, pointerLastScreenRef, pointerDepthRef, pointerDownPieceRef, pointerDownWasSelectedRef, kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones, pendingDrop, setPendingDrop, groupRef, setDragHeight, sceneScale, currentTurn, setCurrentTurn, lastMove, setLastMove, setMoveHistory, moveHistory, showCastlePrompt, showPromotionPrompt, gameOver, generateMoveNotation, moveLockRef, aiSide, pushStateSnapshot, boardFlipped, coordMoveHistoryRef, setCoordMoveHistory, onBeforeUserMove, onPuzzleHumanMove, inHistoryView, displayPiecesOverride }) {
       const boardXScale = useBoardXScale();
       const levels = getLevelY();
       const pieces = [];
@@ -742,6 +742,7 @@ export function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelect
           // No need for re-validation here - trust the castle metadata from move generation.
         }
         if (selectedPieceId == null) return;
+        try { if (typeof onBeforeUserMove === 'function') onBeforeUserMove(); } catch (err) {}
         moverBefore = piecesState.find(pp => pp.id === selectedPieceId);
         let notation = '';
         try { notation = generateMoveNotation(moverBefore, finalTarget, piecesState); } catch (err) { notation = ''; }
@@ -882,7 +883,7 @@ export function Pieces({ piecesState, setPiecesState, selectedPieceId, setSelect
       } catch (e) {
         console.error('Error in _doMove:', e);
       }
-      }, [selectedPieceId, piecesState, setPiecesState, setSelectedPieceId, setCurrentTurn, setLastMove, setMoveHistory, generateMoveNotation, squareToNotation, pushStateSnapshot, onPuzzleHumanMove]);
+      }, [selectedPieceId, piecesState, setPiecesState, setSelectedPieceId, setCurrentTurn, setLastMove, setMoveHistory, generateMoveNotation, squareToNotation, pushStateSnapshot, onBeforeUserMove, onPuzzleHumanMove]);
 
       // wrapper to prompt or execute
       const moveTo = useCallback((target) => {

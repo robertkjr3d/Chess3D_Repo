@@ -66,7 +66,7 @@ function Square({ position, color, xs, highlight }) {
   );
 }
 
-function BoardLevel({ y, z, flip = false, flipBoard = false, lastMove }) {
+function BoardLevel({ y, z, flip = false, flipBoard = false, lastMove, hintSquares }) {
   const xs = useBoardXScale();
   const squares = [];
   for (let x = 0; x < 8; x++) {
@@ -105,6 +105,16 @@ function BoardLevel({ y, z, flip = false, flipBoard = false, lastMove }) {
           color = isWhite ? '#fff176' : '#f8d56d';
         }
       }
+      // Hint squares: yellow highlight for suggested move (drawn over lastMove highlight)
+      if (hintSquares && hintSquares.from && hintSquares.to) {
+        const boardX = flipBoard ? 7 - x : x;
+        const isHint =
+          (hintSquares.from.x === boardX && hintSquares.from.y === row && hintSquares.from.z === z) ||
+          (hintSquares.to.x === boardX && hintSquares.to.y === row && hintSquares.to.z === z);
+        if (isHint) {
+          color = isWhite ? '#fde047' : '#ca8a04';
+        }
+      }
       squares.push(
         <Square
           key={`${y}-${x}-${row}`}
@@ -119,7 +129,7 @@ function BoardLevel({ y, z, flip = false, flipBoard = false, lastMove }) {
   return <group>{squares}</group>;
 }
 
-export function QuadLevelBoard({ flipBoard = false, lastMove }) {
+export function QuadLevelBoard({ flipBoard = false, lastMove, hintSquares }) {
   // render from bottom -> top for correct visual stacking
   const bottomToTop = getLevelY().slice().reverse();
   return (
@@ -132,6 +142,7 @@ export function QuadLevelBoard({ flipBoard = false, lastMove }) {
           flip={i % 2 === 0}
           flipBoard={flipBoard}
           lastMove={lastMove}
+          hintSquares={hintSquares}
         />
       ))}
     </group>

@@ -44,6 +44,11 @@ enum class FilterMode {
     AtMostMate2
 };
 
+enum class FirstMoveMode {
+    NonCheckOnly,
+    NonCheckOrSacCheck
+};
+
 struct MinedPuzzle {
     std::string fen;
     Move3D      best;
@@ -183,7 +188,40 @@ static void randomize_start_position(Position3D& pos, std::mt19937& rng, int pli
     }
 }
 
-static bool passes_solution_move_filter(const Position3D& pos, Move3D bestMove, Search3D& verifier) {
+static int count_checked_kings(const Position3D& pos, Color sideInCheck) {
+    int checked = 0;
+    for (int i = 0; i < pos.king_count(sideInCheck); ++i) {
+        Square k = pos.king_square(sideInCheck, i);
+        if (k != SQ_NONE && pos.is_attacked(k, ~sideInCheck))
+            ++checked;
+    }
+    return checked;
+}
+
+static bool has_forced_mate_in_one_move(Position3D& attackerToMovePos, bool requireSingleKing) {
+    auto legal = attackerToMovePos.generate_legal_moves();
+    for (const auto& m : legal) {
+        Position3D afterMateTry = attackerToMovePos;
+        afterMateTry.do_move(m); // defender to move
+
+        Color defender = afterMateTry.side_to_move();
+        if (!afterMateTry.in_check(defender))
+            continue;
+
+        auto defenderLegal = afterMateTry.generate_legal_moves();
+        if (!defenderLegal.empty())
+            continue;
+
+        if (requireSingleKing && count_checked_kings(afterMateTry, defender) != 1)
+            continue;
+
+        return true;
+    }
+
+    return false;
+}
+
+static bool passes_solution_move_filter(const Position3D& pos, Move3D bestMove, FirstMoveMode mode) {
     if (!bestMove.is_ok())
         return false;
 
@@ -193,12 +231,16 @@ static bool passes_solution_move_filter(const Position3D& pos, Move3D bestMove, 
     Color defender = afterBest.side_to_move();
     bool givesCheck = afterBest.in_check(defender);
 
-    // Filter #1: keep if the answer is not a check move
+    if (mode == FirstMoveMode::NonCheckOnly)
+        return !givesCheck;
+
+    // Legacy mode:
+    // - keep if first move is non-check,
+    // - or if it's a checking sacrifice that can be captured immediately
+    //   and still leaves mate-in-1.
     if (!givesCheck)
         return true;
 
-    // Filter #2: if the answer is check, keep only if defender can capture
-    // the checking piece immediately and attacker still has mate-in-1.
     Square checkerSq = bestMove.to_sq();
     auto replies = afterBest.generate_legal_moves();
 
@@ -206,7 +248,6 @@ static bool passes_solution_move_filter(const Position3D& pos, Move3D bestMove, 
         if (r.to_sq() != checkerSq)
             continue;
 
-        // Must be an actual capture on the checker square
         Piece target = afterBest.piece_on(checkerSq);
         if (target == NO_PIECE)
             continue;
@@ -214,14 +255,14 @@ static bool passes_solution_move_filter(const Position3D& pos, Move3D bestMove, 
         Position3D afterCapture = afterBest;
         afterCapture.do_move(r); // attacker to move
 
-        if (is_mate_in_1(afterCapture, verifier))
+        if (has_forced_mate_in_one_move(afterCapture, false))
             return true;
     }
 
     return false;
 }
 
-static bool move_forces_mate_in_two(Position3D& root, const Move3D& first, Search3D& verifier) {
+static bool move_forces_mate_in_two(Position3D& root, const Move3D& first, bool requireSingleKingMate) {
     Position3D afterFirst = root;
     afterFirst.do_move(first); // defender to move
 
@@ -233,22 +274,27 @@ static bool move_forces_mate_in_two(Position3D& root, const Move3D& first, Searc
         Position3D afterReply = afterFirst;
         afterReply.do_move(r); // attacker to move
 
-        SearchResult rr = verifier.search(afterReply, 3, 350);
-        if (!rr.best_move.is_ok() || rr.score < VALUE_MATE - 2)
+        if (!has_forced_mate_in_one_move(afterReply, requireSingleKingMate))
             return false;
     }
 
     return true;
 }
 
-static bool find_unique_mate2_solution(Position3D& pos, Search3D& verifier, Move3D& outUnique) {
+static bool find_unique_mate2_solution(Position3D& pos,
+                                       Move3D& outUnique,
+                                       bool requireSingleKingMate) {
+    // Reject puzzle starts where side to move is already in check.
+    if (pos.in_check(pos.side_to_move()))
+        return false;
+
     auto legal = pos.generate_legal_moves();
     int winning = 0;
     Move3D candidate = Move3D::none();
 
     for (const auto& m : legal) {
         Position3D copy = pos;
-        if (move_forces_mate_in_two(copy, m, verifier)) {
+        if (move_forces_mate_in_two(copy, m, requireSingleKingMate)) {
             ++winning;
             candidate = m;
             if (winning > 1)
@@ -304,7 +350,12 @@ static bool cull_file_for_unique_solutions(const std::string& inputPath, const s
         }
 
         Move3D unique = Move3D::none();
-        if (!find_unique_mate2_solution(pos, verifier, unique)) {
+        if (!find_unique_mate2_solution(pos, unique, false)) {
+            ++dropped;
+            continue;
+        }
+        unique = Move3D::none();
+        if (!find_unique_mate2_solution(pos, unique, false)) {
             ++dropped;
             continue;
         }
@@ -346,6 +397,8 @@ int main(int argc, char* argv[]) {
     std::string outPath = "mate2_puzzles.txt";
     bool randomizedSelfplay = true;
     FilterMode filterMode = FilterMode::ExactMate2;
+    FirstMoveMode firstMoveMode = FirstMoveMode::NonCheckOnly;
+    bool requireSingleKingMate = false;
 
     if (argc >= 2) {
         games = std::atoi(argv[1]);
@@ -364,6 +417,18 @@ int main(int argc, char* argv[]) {
             filterMode = FilterMode::AtMostMate2;
         else
             filterMode = FilterMode::ExactMate2;
+    }
+    if (argc >= 6) {
+        std::string fmm = argv[5];
+        if (fmm == "saccheck" || fmm == "sac-check")
+            firstMoveMode = FirstMoveMode::NonCheckOrSacCheck;
+        else
+            firstMoveMode = FirstMoveMode::NonCheckOnly;
+    }
+    if (argc >= 7) {
+        std::string km = argv[6];
+        if (km == "singleking" || km == "single-king" || km == "single")
+            requireSingleKingMate = true;
     }
 
     const auto tick64 = static_cast<std::uint64_t>(
@@ -400,6 +465,8 @@ int main(int argc, char* argv[]) {
     std::printf("Output (absolute): %s\n", resolvedOut.string().c_str());
     std::printf("Selfplay mode: %s\n", randomizedSelfplay ? "randomized" : "deterministic");
     std::printf("Filter mode: %s\n", filterMode == FilterMode::ExactMate2 ? "exact" : "atmost2");
+    std::printf("First move mode: %s\n", firstMoveMode == FirstMoveMode::NonCheckOnly ? "non-check-only" : "allow-sac-check");
+    std::printf("King mate mode: %s\n", requireSingleKingMate ? "single-king-only" : "any-king" );
     std::printf("Existing puzzles loaded: %zu\n\n", seenFens.size());
 
     for (int g = 1; g <= games; ++g) {
@@ -428,8 +495,9 @@ int main(int argc, char* argv[]) {
 
                 // Enforce unique mate-in-2 first move.
                 Move3D unique = Move3D::none();
-                if (!find_unique_mate2_solution(pos, verifier, unique))
+                if (!find_unique_mate2_solution(pos, unique, requireSingleKingMate)) {
                     continue;
+                }
                 p.best = unique;
 
                 // Track mate-in-1 candidates for diagnostics (only meaningful in exact mode)
@@ -437,7 +505,7 @@ int main(int argc, char* argv[]) {
                     ++candidatesMate1;
                 }
 
-                if (!passes_solution_move_filter(pos, p.best, verifier))
+                if (!passes_solution_move_filter(pos, p.best, firstMoveMode))
                     continue;
 
                 if (seenFens.insert(p.fen).second) {

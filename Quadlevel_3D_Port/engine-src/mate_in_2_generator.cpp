@@ -234,6 +234,10 @@ Position3D MateInTwoGenerator::generate_random_position(int depth) {
 
 bool MateInTwoGenerator::verify_mate_in_two(const Position3D& pos, Move3D& out_first_move,
                                            int time_limit_ms) {
+    // Reject puzzles where side to move is already in check.
+    if (pos.in_check(pos.side_to_move()))
+        return false;
+
     // Quick gate: position should evaluate as mate-in-2 candidate first.
     Position3D work_pos = pos;
     SearchResult result = verifier.search(work_pos, 5, time_limit_ms);

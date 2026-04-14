@@ -129,6 +129,34 @@
   display: block;
 }
 
+.canvas-idle {
+  filter: saturate(0.45) brightness(0.62);
+}
+
+.idle-board-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 45%, rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.45));
+}
+
+.idle-board-overlay-card {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(17, 24, 39, 0.72);
+  color: #f3f4f6;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
 /* Mobile styles */
 @media (max-width: 768px) {
   .layout {
