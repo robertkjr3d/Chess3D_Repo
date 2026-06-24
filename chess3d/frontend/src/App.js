@@ -1991,22 +1991,19 @@ function SceneWithModels({ piecesProps, ghostProps, onReady }) {
         try {
           const payload = { state: { piecesState, moveHistory, coordMoveHistory, currentTurn, lastMove, aiSide, gameStarted } };
           const existingId = localStorage.getItem(SERVER_ID_KEY);
-          const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
           if (existingId) {
-            // update
-            const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state, ownerToken }) });
+            // update — ownerToken is sent via HttpOnly cookie automatically
+            const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
             if (!resp.ok) {
               if (resp.status === 404) {
                 // Game not found, clear localStorage and create new
                 console.log('Game not found, creating new game');
                 localStorage.removeItem(SERVER_ID_KEY);
-                localStorage.removeItem(SERVER_TOKEN_KEY);
                 // Fall through to create new game
               } else if (resp.status === 401 || resp.status === 403) {
-                // Loaded game is readable but not owned by this client; fork on next save.
+                // No ownership cookie for this game; fork to new owned game.
                 console.log('No write access to loaded game, creating new owned game');
                 localStorage.removeItem(SERVER_ID_KEY);
-                localStorage.removeItem(SERVER_TOKEN_KEY);
                 // Fall through to create new game
               } else {
                 throw new Error('update failed');
@@ -2016,16 +2013,15 @@ function SceneWithModels({ piecesProps, ghostProps, onReady }) {
               return;
             }
           }
-          const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
+          const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payload.state }) });
           if (!resp.ok) {
             const errorText = await resp.text();
             console.error('Server save failed:', resp.status, errorText);
             throw new Error('save failed');
           }
           const j = await resp.json();
-          if (j.id && j.ownerToken) {
+          if (j.id) {
             localStorage.setItem(SERVER_ID_KEY, j.id);
-            localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
             console.log(`Saved to server. ID: ${j.id}`);
           }
         } catch (e) { 
@@ -2040,21 +2036,17 @@ function SceneWithModels({ piecesProps, ghostProps, onReady }) {
           const payloadState = explicitState || { piecesState, moveHistory, currentTurn, lastMove, aiSide, gameStarted };
           try { console.log('saveToServerImmediate payloadState', payloadState); } catch (e) {}
           const existingId = localStorage.getItem(SERVER_ID_KEY);
-          const ownerToken = localStorage.getItem(SERVER_TOKEN_KEY);
           if (existingId) {
-            const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState, ownerToken }) });
+            // ownerToken sent via HttpOnly cookie automatically
+            const resp = await fetch(`${API_BASE_URL}/api/games/${existingId}`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState }) });
             if (!resp.ok) {
               if (resp.status === 404) {
-                // Game not found, clear localStorage and create new
                 console.log('Game not found, creating new game');
                 localStorage.removeItem(SERVER_ID_KEY);
-                localStorage.removeItem(SERVER_TOKEN_KEY);
                 // Fall through to create new game
               } else if (resp.status === 401 || resp.status === 403) {
-                // Loaded game is readable but not owned by this client; fork on next save.
                 console.log('No write access to loaded game, creating new owned game');
                 localStorage.removeItem(SERVER_ID_KEY);
-                localStorage.removeItem(SERVER_TOKEN_KEY);
                 // Fall through to create new game
               } else {
                 throw new Error('update failed');
@@ -2064,12 +2056,11 @@ function SceneWithModels({ piecesProps, ghostProps, onReady }) {
               return;
             }
           }
-          const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState }) });
+          const resp = await fetch(`${API_BASE_URL}/api/games`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: payloadState }) });
           if (!resp.ok) throw new Error('save failed');
           const j = await resp.json();
-          if (j.id && j.ownerToken) {
+          if (j.id) {
             localStorage.setItem(SERVER_ID_KEY, j.id);
-            localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
             console.log(`Saved to server. ID: ${j.id}`);
           }
         } catch (e) { console.debug('server immediate save failed', e); }
@@ -2086,13 +2077,11 @@ function SceneWithModels({ piecesProps, ghostProps, onReady }) {
         try {
           const id = idPrompt || prompt('Enter game id to load:');
           if (!id) return;
-          const resp = await fetch(`${API_BASE_URL}/api/games/${id}`);
+          const resp = await fetch(`${API_BASE_URL}/api/games/${id}`, { credentials: 'include' });
           if (!resp.ok) { 
             console.log(`Load failed: ${resp.status} ${resp.statusText}`);
             if (resp.status === 404) {
-              // Game not found - clear localStorage
               localStorage.removeItem(SERVER_ID_KEY);
-              localStorage.removeItem(SERVER_TOKEN_KEY);
               console.log('Game not found, cleared localStorage');
               return;
             }
@@ -2130,14 +2119,12 @@ function SceneWithModels({ piecesProps, ghostProps, onReady }) {
             setLastMove(s.lastMove || null);
             try { setAiSide(s.aiSide || null); } catch (e) {}
             try { setGameStarted(!!s.gameStarted); } catch (e) {}
-            // Keep update credentials only when GET includes a token (owned session).
-            if (j.id && j.ownerToken) {
+            // Store game ID so subsequent saves can update this game.
+            // Ownership is verified via HttpOnly cookie — if not present, next save will fork.
+            if (j.id) {
               localStorage.setItem(SERVER_ID_KEY, j.id);
-              localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
             } else {
-              // Prevent stale credentials from another game from causing update failures.
               localStorage.removeItem(SERVER_ID_KEY);
-              localStorage.removeItem(SERVER_TOKEN_KEY);
             }
             // Rebuild play-through snapshots from coord move history
             statesHistoryRef.current = replayToSnapshots(serverCoord);

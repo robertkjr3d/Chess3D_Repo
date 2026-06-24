@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 using Chess3DBackend.Models;
 using Chess3DBackend.Data;
 
@@ -72,14 +74,55 @@ else
         options.UseInMemoryDatabase("Chess3D"));
 }
 
-// Configure CORS to allow frontend
+// Configure CORS to allow specific frontend origins
+var allowedOrigins = builder.Configuration["CORS_AllowedOrigins"]
+    ?? (builder.Environment.IsDevelopment() 
+        ? "http://localhost:3000;http://localhost:3001" 
+        : "https://chess3d.com");
+
+var originArray = allowedOrigins.Split(';', StringSplitOptions.RemoveEmptyEntries);
+Console.WriteLine($"CORS allowed origins: {string.Join(", ", originArray)}");
+
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowAll", policy =>
+    options.AddPolicy("AllowSpecificOrigins", policy =>
     {
-        policy.AllowAnyOrigin()
+        policy.WithOrigins(originArray)
               .AllowAnyMethod()
-              .AllowAnyHeader();
+              .AllowAnyHeader()
+              .AllowCredentials();
+    });
+});
+
+// Rate limiting — per-IP sliding windows
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = 429;
+    options.OnRejected = async (context, _) =>
+    {
+        context.HttpContext.Response.ContentType = "application/json";
+        await context.HttpContext.Response.WriteAsync(
+            "{\"error\":\"Too many requests. Please slow down.\"}");
+    };
+
+    // AI endpoint: 10 requests per minute per IP
+    options.AddSlidingWindowLimiter("ai", limiterOptions =>
+    {
+        limiterOptions.Window           = TimeSpan.FromMinutes(1);
+        limiterOptions.SegmentsPerWindow = 6;  // check every 10 s
+        limiterOptions.PermitLimit      = 10;
+        limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        limiterOptions.QueueLimit        = 0;
+    });
+
+    // General API: 60 requests per minute per IP
+    options.AddSlidingWindowLimiter("general", limiterOptions =>
+    {
+        limiterOptions.Window            = TimeSpan.FromMinutes(1);
+        limiterOptions.SegmentsPerWindow = 6;
+        limiterOptions.PermitLimit       = 60;
+        limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        limiterOptions.QueueLimit        = 0;
     });
 });
 
@@ -172,15 +215,16 @@ app.Use(async (context, next) =>
         Console.WriteLine($"!!! MIDDLEWARE ERROR: {ex.GetType().Name}: {ex.Message}");
         Console.WriteLine($"Stack: {ex.StackTrace}");
         context.Response.StatusCode = 500;
-        await context.Response.WriteAsJsonAsync(new { error = ex.Message, type = ex.GetType().Name });
+        await context.Response.WriteAsJsonAsync(new { error = "An unexpected error occurred." });
     }
 });
 
-app.UseCors("AllowAll");
+app.UseCors("AllowSpecificOrigins");
+app.UseRateLimiter();
 app.UseAuthorization();
-app.MapControllers();
+app.MapControllers().RequireRateLimiting("general");
 
-Console.WriteLine("✓ CORS configured (AllowAll)");
+Console.WriteLine("✓ CORS configured (specific origins only)");
 Console.WriteLine("✓ Controllers mapped");
 
 // Root endpoint

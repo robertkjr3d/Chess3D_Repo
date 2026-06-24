@@ -72,7 +72,7 @@ public class ZoomCalibrationsController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error saving zoom calibration");
-            return StatusCode(500, new { error = ex.Message });
+            return StatusCode(500, new { error = "An unexpected error occurred." });
         }
     }
 
@@ -90,7 +90,7 @@ public class ZoomCalibrationsController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error retrieving zoom calibrations");
-            return StatusCode(500, new { error = ex.Message });
+            return StatusCode(500, new { error = "An unexpected error occurred." });
         }
     }
 }

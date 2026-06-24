@@ -12,12 +12,33 @@ public class GamesController : ControllerBase
 {
     private readonly GameDbContext _context;
     private readonly ILogger<GamesController> _logger;
+    private readonly IWebHostEnvironment _env;
 
-    public GamesController(GameDbContext context, ILogger<GamesController> logger)
+    public GamesController(GameDbContext context, ILogger<GamesController> logger, IWebHostEnvironment env)
     {
         _context = context;
         _logger = logger;
+        _env = env;
     }
+
+    /// Sets (or refreshes) the HttpOnly owner token cookie.
+    private void SetOwnerTokenCookie(string token)
+    {
+        Response.Cookies.Append("chess3d_owner_token", token, new CookieOptions
+        {
+            HttpOnly  = true,
+            Secure    = _env.IsProduction(),
+            SameSite  = _env.IsProduction() ? SameSiteMode.Strict : SameSiteMode.Lax,
+            Expires   = DateTimeOffset.UtcNow.AddDays(90),
+            Path      = "/"
+        });
+    }
+
+    /// Resolves the owner token: cookie takes priority; falls back to request body for backward compat.
+    private string? ResolveOwnerToken(string? bodyToken) =>
+        Request.Cookies.TryGetValue("chess3d_owner_token", out var cookie) && !string.IsNullOrWhiteSpace(cookie)
+            ? cookie
+            : bodyToken;
 
     // POST: api/games - Create new game or update existing
     [HttpPost]
@@ -37,14 +58,16 @@ public class GamesController : ControllerBase
                     return NotFound(new { error = "not found" });
                 }
 
+                var ownerToken = ResolveOwnerToken(request.OwnerToken);
+
                 // Require a valid owner token for all updates
-                if (string.IsNullOrWhiteSpace(request.OwnerToken))
+                if (string.IsNullOrWhiteSpace(ownerToken))
                 {
                     return Unauthorized(new { error = "owner token required" });
                 }
 
                 if (string.IsNullOrWhiteSpace(existingGame.OwnerToken) ||
-                    existingGame.OwnerToken != request.OwnerToken)
+                    existingGame.OwnerToken != ownerToken)
                 {
                     return StatusCode(403, new { error = "forbidden" });
                 }
@@ -53,11 +76,11 @@ public class GamesController : ControllerBase
                 existingGame.UpdatedAt = now;
 
                 await _context.SaveChangesAsync();
+                SetOwnerTokenCookie(existingGame.OwnerToken);
 
                 return Ok(new GameResponse
                 {
                     Id = existingGame.Id,
-                    OwnerToken = existingGame.OwnerToken,
                     UpdatedAt = existingGame.UpdatedAt
                 });
             }
@@ -75,17 +98,17 @@ public class GamesController : ControllerBase
 
             _context.Games.Add(newGame);
             await _context.SaveChangesAsync();
+            SetOwnerTokenCookie(newGame.OwnerToken);
 
             return Ok(new GameResponse
             {
-                Id = newGame.Id,
-                OwnerToken = newGame.OwnerToken
+                Id = newGame.Id
             });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error in CreateOrUpdateGame");
-            return StatusCode(500, new { error = "server error", message = ex.Message });
+            return StatusCode(500, new { error = "An unexpected error occurred." });
         }
     }
 
@@ -126,9 +149,8 @@ public class GamesController : ControllerBase
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"!!! ERROR: {ex.GetType().Name}: {ex.Message}");
-            _logger.LogError(ex, $"Error in GetGame: {id}");
-            return StatusCode(500, new { error = ex.Message });
+            _logger.LogError(ex, "Error in GetGame: {Id}", id);
+            return StatusCode(500, new { error = "An unexpected error occurred." });
         }
     }
 
@@ -157,9 +179,11 @@ public class GamesController : ControllerBase
             }
 
             Console.WriteLine($"Game OwnerToken present: {!string.IsNullOrEmpty(game.OwnerToken)}");
-            
+
+            var ownerToken = ResolveOwnerToken(request.OwnerToken);
+
             // Require a valid owner token for all updates
-            if (string.IsNullOrWhiteSpace(request.OwnerToken))
+            if (string.IsNullOrWhiteSpace(ownerToken))
             {
                 Console.WriteLine($"PUT /api/games/{id} - Unauthorized: missing owner token");
                 _logger.LogWarning($"PUT /api/games/{id} - Unauthorized: missing owner token");
@@ -167,7 +191,7 @@ public class GamesController : ControllerBase
             }
 
             if (string.IsNullOrWhiteSpace(game.OwnerToken) ||
-                game.OwnerToken != request.OwnerToken)
+                game.OwnerToken != ownerToken)
             {
                 Console.WriteLine($"PUT /api/games/{id} - Forbidden: token mismatch");
                 _logger.LogWarning($"PUT /api/games/{id} - Forbidden: token mismatch");
@@ -184,6 +208,7 @@ public class GamesController : ControllerBase
 
             Console.WriteLine("Saving changes to database...");
             await _context.SaveChangesAsync();
+            SetOwnerTokenCookie(game.OwnerToken);
             Console.WriteLine($"PUT /api/games/{id} - SUCCESS");
 
             return Ok(new GameResponse
@@ -194,15 +219,8 @@ public class GamesController : ControllerBase
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"=== PUT /api/games/{id} ERROR ===");
-            Console.WriteLine($"Error: {ex.Message}");
-            Console.WriteLine($"Stack trace: {ex.StackTrace}");
-            if (ex.InnerException != null)
-            {
-                Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
-            }
-            _logger.LogError(ex, $"Error in UpdateGame: {id}");
-            return StatusCode(500, new { error = "server error", message = ex.Message, stack = ex.StackTrace });
+            _logger.LogError(ex, "Error in UpdateGame: {Id}", id);
+            return StatusCode(500, new { error = "An unexpected error occurred." });
         }
     }
 }

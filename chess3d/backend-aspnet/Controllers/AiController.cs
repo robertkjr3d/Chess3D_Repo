@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Chess3DBackend.Controllers;
 
@@ -68,8 +69,13 @@ public class AiController : ControllerBase
     /// Replay the supplied move list from the start position and return the engine's best move.
     /// </summary>
     [HttpPost("bestmove")]
+    [EnableRateLimiting("ai")]
     public async Task<ActionResult<BestMoveResponse>> GetBestMove([FromBody] BestMoveRequest request)
     {
+        // Clamp inputs to prevent resource exhaustion
+        request.Depth  = Math.Clamp(request.Depth,  1, 20);
+        request.TimeMs = Math.Clamp(request.TimeMs, 100, 10_000);
+
         var engine = Engine;
         if (engine == null)
             return StatusCode(503, new BestMoveResponse { Error = "QuadLevel engine not loaded — check Stockfish_3D_Port.dll is present." });
@@ -154,7 +160,7 @@ public class AiController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "BestMove search threw an exception");
-            return StatusCode(500, new BestMoveResponse { Error = ex.Message });
+            return StatusCode(500, new BestMoveResponse { Error = "An unexpected error occurred." });
         }
         finally
         {
@@ -178,7 +184,8 @@ public class AiController : ControllerBase
         }
         catch (Exception ex)
         {
-            return Ok(new { available = false, message = ex.Message });
+            _logger.LogError(ex, "Engine status probe failed");
+            return Ok(new { available = false, message = "Engine probe failed." });
         }
     }
 }
