@@ -8,3 +8,4 @@ logs/
 appsettings.Development.json
 appsettings.Production.json
 README.md
+web.config

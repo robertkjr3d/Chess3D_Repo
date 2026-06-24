@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+﻿import { useState, useRef, useEffect, useMemo, useCallback, Suspense } from "react";
 import * as THREE from 'three';
 //import { Canvas, useThree, useFrame } from "@react-three/fiber";
 import { Canvas, useThree } from "@react-three/fiber";
@@ -10,7 +10,7 @@ import {
   simulateMove, isAnyKingInCheck, attackersOfSquare, staticExchangeEval,
   hasAnyLegalMove, canAnyPieceCaptureAttackers,
   CASTLE_ENTRIES,
-  KING_BLOCK_MAP, ROOK_FROM_MAP, lookupKingBlock, isBlockedByKingBlockMap, parseFen,
+  KING_BLOCK_MAP, ROOK_FROM_MAP, lookupKingBlock, isBlockedByKingBlockMap, parseFen, computeFen,
 } from './utils/chessLogic';
 import { GLOBAL_PIECE_SCALE, PIECE_ASPECT_RATIO, GHOST_SCALE_FACTOR, DRAG_LEVEL_SCALE,
   MOVE_PIXEL_THRESH, MOVE_WORLD_THRESH, MOVE_HIT_RADIUS, PIECE_HIT_RADIUS, PIECE_HIT_DISC_Y,
@@ -105,6 +105,56 @@ function getQueryParams() {
   return params;
 }
 
+// Kick off GLB downloads immediately when the JS bundle loads — before React renders anything.
+// This means models are already in-flight while the user reads the game-type selection screen.
+const _publicAssetBase = process.env.PUBLIC_URL || '';
+useGLTF.preload(`${_publicAssetBase}/models/King_small.glb`);
+useGLTF.preload(`${_publicAssetBase}/models/pawn_small.glb`);
+useGLTF.preload(`${_publicAssetBase}/models/knight_small.glb`);
+useGLTF.preload(`${_publicAssetBase}/models/bishop_small.glb`);
+useGLTF.preload(`${_publicAssetBase}/models/rook_small.glb`);
+useGLTF.preload(`${_publicAssetBase}/models/queen_small.glb`);
+
+// Inner scene component — lives inside the Canvas so useGLTF suspends here instead of at App level.
+// Wrapped in <Suspense fallback={null}> so the rest of the UI (selection screen) renders immediately.
+function SceneWithModels({ piecesProps, ghostProps, onReady }) {
+  const publicAssetBase = process.env.PUBLIC_URL || '';
+  const kingGltf   = useGLTF(`${publicAssetBase}/models/King_small.glb`);
+  const pawnGltf   = useGLTF(`${publicAssetBase}/models/pawn_small.glb`);
+  const knightGltf = useGLTF(`${publicAssetBase}/models/knight_small.glb`);
+  const bishopGltf = useGLTF(`${publicAssetBase}/models/bishop_small.glb`);
+  const rookGltf   = useGLTF(`${publicAssetBase}/models/rook_small.glb`);
+  const queenGltf  = useGLTF(`${publicAssetBase}/models/queen_small.glb`);
+
+  const clones = useMemo(() => {
+    try { console.debug('recomputing clones cache'); } catch (e) {}
+    const map = {};
+    const modelMap = { R: rookGltf, N: knightGltf, B: bishopGltf, K: kingGltf, Q: queenGltf, p: pawnGltf };
+    ['white','#615c5c'].forEach((colorHex) => {
+      Object.keys(modelMap).forEach((t) => {
+        try {
+          const c = cloneAndColor(modelMap[t], colorHex);
+          map[`${t}-${colorHex}`] = c;
+        } catch (err) {}
+      });
+    });
+    return map;
+  }, [kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf]);
+
+  const modelProps = { kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf, clones };
+
+  // Signal parent that models are ready (Suspense has resolved and this component has mounted)
+  useEffect(() => {
+    try { if (typeof onReady === 'function') onReady(); } catch (e) {}
+  }, [onReady]);
+
+  return (
+    <>
+      <Pieces {...piecesProps} {...modelProps} />
+      <Ghost  {...ghostProps}  {...modelProps} />
+    </>
+  );
+}
 
     export default function App() {
       const [currentTurn, setCurrentTurn] = useState('white');
@@ -155,6 +205,8 @@ function getQueryParams() {
         if (gameOver) setShowGameOverModal(true);
       }, [gameOver]);
       const [gameStarted, setGameStarted] = useState(false);
+      const [modelsLoaded, setModelsLoaded] = useState(false);
+      const handleModelsReady = useCallback(() => { setModelsLoaded(true); }, []);
       const [isDragging, setIsDragging] = useState(false);
       const [dragPoint, setDragPoint] = useState([0, 0, 0]);
       const [dragHeight, setDragHeight] = useState(0);
@@ -233,29 +285,6 @@ function getQueryParams() {
       const groupRef = useRef();
       const sceneScale = 0.470;
       const publicAssetBase = process.env.PUBLIC_URL || '';
-      // load models once at App level and pass to children
-      const kingGltf = useGLTF(`${publicAssetBase}/models/King_small.glb`);
-      const pawnGltf = useGLTF(`${publicAssetBase}/models/pawn_small.glb`);
-      const knightGltf = useGLTF(`${publicAssetBase}/models/knight_small.glb`);
-      const bishopGltf = useGLTF(`${publicAssetBase}/models/bishop_small.glb`);
-      const rookGltf = useGLTF(`${publicAssetBase}/models/rook_small.glb`);
-      const queenGltf = useGLTF(`${publicAssetBase}/models/queen_small.glb`);
-
-      // build a cache of normalized clones per piece type + color so ghost and piece share same object
-      const clones = useMemo(() => {
-        try { console.debug('recomputing clones cache'); } catch (e) {}
-        const map = {};
-        const modelMap = { R: rookGltf, N: knightGltf, B: bishopGltf, K: kingGltf, Q: queenGltf, p: pawnGltf };
-        ['white','#615c5c'].forEach((colorHex) => {
-          Object.keys(modelMap).forEach((t) => {
-            try {
-              const c = cloneAndColor(modelMap[t], colorHex);
-              map[`${t}-${colorHex}`] = c;
-            } catch (err) {}
-          });
-        });
-        return map;
-      }, [kingGltf, pawnGltf, knightGltf, bishopGltf, rookGltf, queenGltf]);
 
       const showCastlePrompt = (opts) => {
         // opts: { title, onYes, onNo }
@@ -736,7 +765,7 @@ function getQueryParams() {
           x: 8 - parseInt(s[2], 10)
         });
         // Yield one frame so the Thinking UI can render before expensive hint ordering starts.
-        setTimeout(() => {
+        setTimeout(async () => {
           try {
             if (requestVersion !== hintRequestVersionRef.current) return;
             if (usePuzzleAnswerMode) {
@@ -768,6 +797,73 @@ function getQueryParams() {
               return { from: { x: mover.x, y: mover.y, z: mover.z }, to: { x: best.x, y: best.y, z: best.z } };
             };
 
+            const shouldUseBackendHint = (() => {
+              if (aiSide) {
+                // AI games always attempt backend engine hinting first, including dumb mode.
+                // If backend is unavailable, hinting falls back locally.
+                return true;
+              }
+              // In two-player mode, use Smart-AI backend hinting.
+              return gameMode !== 'puzzle';
+            })();
+
+            const hintProfile = (() => {
+              if (aiSide) {
+                if (aiStrength === 'smarter') return { depth: 14, timeMs: 12000 };
+                return { depth: 8, timeMs: 5000 };
+              }
+              return { depth: 8, timeMs: 5000 }; // Smart profile for 2-player mode
+            })();
+
+            const getEngineHintForSide = async (side) => {
+              if (!side) return null;
+              try {
+                const livePiecesForFen = prevPiecesRef.current || piecesState || [];
+                const fenStr = computeFen(livePiecesForFen, currentTurn, lastMove, (moveHistory || []).length);
+                const movesFlat = (coordMoveHistoryRef.current || []).slice();
+                const sfUrl = `${API_BASE_URL}/api/ai/bestmove`;
+                const sfResp = await fetch(sfUrl, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ fen: fenStr, moves: movesFlat, depth: hintProfile.depth, timeMs: hintProfile.timeMs }),
+                  signal: AbortSignal.timeout(hintProfile.timeMs + 8000)
+                });
+                if (!sfResp.ok) return null;
+                const sfResult = await sfResp.json();
+
+                const parseQL = (s) => {
+                  const m = s && s.match(/^([1-4])([a-h])([1-8])$/);
+                  if (!m) return null;
+                  return { z: Number(m[1]) - 1, y: m[2].charCodeAt(0) - 97, x: 8 - Number(m[3]) };
+                };
+
+                const toCoord = parseQL(sfResult.toNotation);
+                const fromCoord = parseQL(sfResult.fromNotation);
+                if (!toCoord) return null;
+
+                const livePieces = (prevPiecesRef.current || piecesState || []);
+                let mover = null;
+                if (fromCoord) {
+                  mover = livePieces.find(p => p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z) || null;
+                }
+                if (!mover) {
+                  const allLegal = getAllLegalMoves(livePieces, side) || [];
+                  let match = fromCoord
+                    ? allLegal.find(mv =>
+                        mv.x === toCoord.x && mv.y === toCoord.y && mv.z === toCoord.z &&
+                        livePieces.find(p => p.id === mv.moverId && p.x === fromCoord.x && p.y === fromCoord.y && p.z === fromCoord.z)
+                      )
+                    : null;
+                  if (!match) match = allLegal.find(mv => mv.x === toCoord.x && mv.y === toCoord.y && mv.z === toCoord.z);
+                  if (match) mover = livePieces.find(p => p.id === match.moverId) || null;
+                }
+                if (!mover) return null;
+                return { from: { x: mover.x, y: mover.y, z: mover.z }, to: { x: toCoord.x, y: toCoord.y, z: toCoord.z } };
+              } catch (e) {
+                return null;
+              }
+            };
+
             const preferredSide = (gameMode === 'puzzle' && puzzleAttempted && puzzlePlayerSide)
               ? puzzlePlayerSide
               : currentTurn;
@@ -776,7 +872,13 @@ function getQueryParams() {
 
             let nextHint = null;
             for (const side of sideCandidates) {
-              nextHint = findHintForSide(side);
+              if (requestVersion !== hintRequestVersionRef.current) return;
+              if (shouldUseBackendHint) {
+                nextHint = await getEngineHintForSide(side);
+              }
+              if (!nextHint) {
+                nextHint = findHintForSide(side);
+              }
               if (nextHint) break;
             }
             if (nextHint) {
@@ -791,7 +893,7 @@ function getQueryParams() {
             }
           }
         }, 0);
-      }, [hintVisible, hintThinking, gameMode, activePuzzle, puzzleAttempted, puzzlePlayerSide, piecesState, currentTurn, getAllLegalMoves, orderMoves, clearHintUi]);
+      }, [hintVisible, hintThinking, gameMode, activePuzzle, puzzleAttempted, puzzlePlayerSide, piecesState, currentTurn, lastMove, moveHistory, aiSide, aiStrength, getAllLegalMoves, orderMoves, clearHintUi]);
 
       // helper: perform a move programmatically (moverId + target)
       const applyMove = useCallback((moverId, finalTarget) => {
@@ -1900,6 +2002,12 @@ function getQueryParams() {
                 localStorage.removeItem(SERVER_ID_KEY);
                 localStorage.removeItem(SERVER_TOKEN_KEY);
                 // Fall through to create new game
+              } else if (resp.status === 401 || resp.status === 403) {
+                // Loaded game is readable but not owned by this client; fork on next save.
+                console.log('No write access to loaded game, creating new owned game');
+                localStorage.removeItem(SERVER_ID_KEY);
+                localStorage.removeItem(SERVER_TOKEN_KEY);
+                // Fall through to create new game
               } else {
                 throw new Error('update failed');
               }
@@ -1939,6 +2047,12 @@ function getQueryParams() {
               if (resp.status === 404) {
                 // Game not found, clear localStorage and create new
                 console.log('Game not found, creating new game');
+                localStorage.removeItem(SERVER_ID_KEY);
+                localStorage.removeItem(SERVER_TOKEN_KEY);
+                // Fall through to create new game
+              } else if (resp.status === 401 || resp.status === 403) {
+                // Loaded game is readable but not owned by this client; fork on next save.
+                console.log('No write access to loaded game, creating new owned game');
                 localStorage.removeItem(SERVER_ID_KEY);
                 localStorage.removeItem(SERVER_TOKEN_KEY);
                 // Fall through to create new game
@@ -2016,10 +2130,14 @@ function getQueryParams() {
             setLastMove(s.lastMove || null);
             try { setAiSide(s.aiSide || null); } catch (e) {}
             try { setGameStarted(!!s.gameStarted); } catch (e) {}
-            // store id/token for future updates
+            // Keep update credentials only when GET includes a token (owned session).
             if (j.id && j.ownerToken) {
               localStorage.setItem(SERVER_ID_KEY, j.id);
               localStorage.setItem(SERVER_TOKEN_KEY, j.ownerToken);
+            } else {
+              // Prevent stale credentials from another game from causing update failures.
+              localStorage.removeItem(SERVER_ID_KEY);
+              localStorage.removeItem(SERVER_TOKEN_KEY);
             }
             // Rebuild play-through snapshots from coord move history
             statesHistoryRef.current = replayToSnapshots(serverCoord);
@@ -2576,6 +2694,13 @@ function getQueryParams() {
                 </div>
               </div>
             )}
+            {gameStarted && !modelsLoaded && (
+              <div className="idle-board-overlay" aria-hidden="true">
+                <div className="idle-board-overlay-card">
+                  Loading 3D pieces…
+                </div>
+              </div>
+            )}
             <Canvas
               key={canvasKey}
               className={`canvas ${boardWaitingForSelection ? 'canvas-idle' : ''}`}
@@ -2736,60 +2861,66 @@ function getQueryParams() {
               <directionalLight position={[5, 12, 5]} intensity={0.9} />
               <group ref={groupRef} scale={sceneScale} position={window.innerWidth <= 480 ? [-0.05, -0.4, 0] : [0, 0, 0]}>
                 <QuadLevelBoard flipBoard={boardFlipped || ((currentTurn === 'black') && !aiSide)} lastMove={lastMove} hintSquares={hintSquares} />
-                <Pieces
-                  piecesState={piecesState}
-                  setPiecesState={setPiecesState}
-                  selectedPieceId={selectedPieceId}
-                  setSelectedPieceId={setSelectedPieceId}
-                  isDragging={isDragging}
-                  dragPoint={dragPoint}
-                  setIsDragging={setIsDragging}
-                  setDragPoint={setDragPoint}
-                  dragPointWorld={dragPointWorld}
-                  setDragPointWorld={setDragPointWorld}
-                  setPointerActive={setPointerActive}
-                  controlsRef={controlsRef}
-                  pointerDownRef={pointerDownRef}
-                  pointerStartRef={pointerStartRef}
-                  pointerDepthRef={pointerDepthRef}
-                  showCastlePrompt={showCastlePrompt}
-                  showPromotionPrompt={showPromotionPrompt}
-                   kingGltf={kingGltf}
-                   pawnGltf={pawnGltf}
-                   knightGltf={knightGltf}
-                   bishopGltf={bishopGltf}
-                   rookGltf={rookGltf}
-                   queenGltf={queenGltf}
-                   clones={clones}
-                  pointerDownPieceRef={pointerDownPieceRef}
-                  pointerStartScreenRef={pointerStartScreenRef}
-                  pointerLastScreenRef={pointerLastScreenRef}
-                  pendingDrop={pendingDrop}
-                  setPendingDrop={setPendingDrop}
-                  groupRef={groupRef}
-                  setDragHeight={setDragHeight}
-                  sceneScale={sceneScale}
-                  currentTurn={currentTurn}
-                  setCurrentTurn={setCurrentTurn}
-                  lastMove={lastMove}
-                    setLastMove={setLastMove}
-                    pointerDownWasSelectedRef={pointerDownWasSelectedRef}
-                    setMoveHistory={setMoveHistory}
-                    moveHistory={moveHistory}
-                    gameOver={gameOver}
-                    generateMoveNotation={generateMoveNotation}
-                    moveLockRef={moveLockRef}
-                    aiSide={aiSide}
-                    pushStateSnapshot={pushStateSnapshot}
-                    boardFlipped={boardFlipped}
-                    coordMoveHistoryRef={coordMoveHistoryRef}
-                    setCoordMoveHistory={setCoordMoveHistory}
-                    onBeforeUserMove={clearHintUi}
-                    onPuzzleHumanMove={handlePuzzleHumanMove}
-                    inHistoryView={viewIndex !== null}
-                    displayPiecesOverride={viewedPieces}
-                />
-                <Ghost dragPoint={dragPoint} dragPointWorld={dragPointWorld} selectedPieceId={selectedPieceId} piecesState={piecesState} isDragging={isDragging} pointerDownRef={pointerDownRef} kingGltf={kingGltf} pawnGltf={pawnGltf} knightGltf={knightGltf} bishopGltf={bishopGltf} rookGltf={rookGltf} queenGltf={queenGltf} clones={clones} currentTurn={currentTurn} />
+                <Suspense fallback={null}>
+                  <SceneWithModels
+                    onReady={handleModelsReady}
+                    piecesProps={{
+                      piecesState,
+                      setPiecesState,
+                      selectedPieceId,
+                      setSelectedPieceId,
+                      isDragging,
+                      dragPoint,
+                      setIsDragging,
+                      setDragPoint,
+                      dragPointWorld,
+                      setDragPointWorld,
+                      setPointerActive,
+                      controlsRef,
+                      pointerDownRef,
+                      pointerStartRef,
+                      pointerDepthRef,
+                      showCastlePrompt,
+                      showPromotionPrompt,
+                      pointerDownPieceRef,
+                      pointerStartScreenRef,
+                      pointerLastScreenRef,
+                      pendingDrop,
+                      setPendingDrop,
+                      groupRef,
+                      setDragHeight,
+                      sceneScale,
+                      currentTurn,
+                      setCurrentTurn,
+                      lastMove,
+                      setLastMove,
+                      pointerDownWasSelectedRef,
+                      setMoveHistory,
+                      moveHistory,
+                      gameOver,
+                      generateMoveNotation,
+                      moveLockRef,
+                      aiSide,
+                      pushStateSnapshot,
+                      boardFlipped,
+                      coordMoveHistoryRef,
+                      setCoordMoveHistory,
+                      onBeforeUserMove: clearHintUi,
+                      onPuzzleHumanMove: handlePuzzleHumanMove,
+                      inHistoryView: viewIndex !== null,
+                      displayPiecesOverride: viewedPieces,
+                    }}
+                    ghostProps={{
+                      dragPoint,
+                      dragPointWorld,
+                      selectedPieceId,
+                      piecesState,
+                      isDragging,
+                      pointerDownRef,
+                      currentTurn,
+                    }}
+                  />
+                </Suspense>
                 
               </group>
                 

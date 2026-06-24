@@ -1088,9 +1088,9 @@ class Search3D {
     uint64_t searchStack[MAX_PLY_3D + 1];
 
     // Material-aware repetition value:
-    //   If we have a material advantage  ? penalise the draw (avoid it)
-    //   If we are behind with no prospects ? welcome the draw
-    //   If roughly equal                  ? slight penalty
+    //   Draws should be bad for the side that is materially ahead,
+    //   and good for the side that is behind.
+    //   IMPORTANT: this value is from side-to-move perspective.
     Value repetition_value(const Position3D& pos) const {
         Color us = pos.side_to_move();
         Value our_mat = VALUE_ZERO, their_mat = VALUE_ZERO;
@@ -1104,19 +1104,24 @@ class Search3D {
         }
         Value advantage = our_mat - their_mat;
 
-        // Two-king factor: with 2 kings, even a minor-piece edge is
-        // dangerous (king-fork potential), so penalise draws more.
+        // Two-king factor: with 2 kings, even a small edge is dangerous,
+        // so scale repetition contempt more aggressively.
         bool two_kings = (pos.king_count(WHITE) == 2 && pos.king_count(BLACK) == 2);
         Value threshold = two_kings ? Value(PawnValue3D / 2) : PawnValue3D;
+        int scale = two_kings ? 1 : 2;
 
-        // Well ahead: penalise draw proportionally (avoid repetition)
+        // Side to move is ahead: avoid repetition/draw.
         if (advantage > threshold)
-            return Value(-advantage / (two_kings ? 1 : 2));  // stronger penalty with 2 kings
-        // Well behind: welcome the draw
+            return Value(-advantage / scale);
+
+        // Side to move is behind: prefer repetition/draw.
+        // This makes the opponent (who is ahead) see a negative score
+        // for repetition lines after negation in negamax.
         if (advantage < -threshold)
-            return VALUE_ZERO;
-        // Roughly equal: mild penalty to discourage lazy draws
-        return Value(-PawnValue3D / 4);
+            return Value((-advantage) / scale);
+
+        // Roughly equal: neutral draw value.
+        return VALUE_ZERO;
     }
 
     // --- Opening book ---

@@ -4,6 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>chess3d-backend-5c84ea07-54bc-4f75-b43e-28a130b89938</UserSecretsId>
   </PropertyGroup>
 
   <!-- Native DLL for P/Invoke — copied to output dir so the runtime can find it -->

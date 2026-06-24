@@ -3,5 +3,8 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Folder Name="/Solution Items/">
+    <File Path="C:/Users/rober/Downloads/chess3d-save-2026-06-04T19_15_04.537Z.json" />
+  </Folder>
   <Project Path="Quadlevel_3D_Port/quadlevel_3D_Port.vcxproj" Id="8371ba04-7e56-4417-b30a-62c6ce2f3be4" />
 </Solution>

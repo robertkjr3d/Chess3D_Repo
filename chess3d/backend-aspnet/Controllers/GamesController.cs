@@ -37,9 +37,13 @@ public class GamesController : ControllerBase
                     return NotFound(new { error = "not found" });
                 }
 
-                // Verify owner token if provided
-                if (!string.IsNullOrEmpty(request.OwnerToken) && 
-                    !string.IsNullOrEmpty(existingGame.OwnerToken) &&
+                // Require a valid owner token for all updates
+                if (string.IsNullOrWhiteSpace(request.OwnerToken))
+                {
+                    return Unauthorized(new { error = "owner token required" });
+                }
+
+                if (string.IsNullOrWhiteSpace(existingGame.OwnerToken) ||
                     existingGame.OwnerToken != request.OwnerToken)
                 {
                     return StatusCode(403, new { error = "forbidden" });
@@ -113,7 +117,6 @@ public class GamesController : ControllerBase
                 id = game.Id,
                 stateJson = game.State ?? "{}",  // Raw JSON string
                 status = game.Status ?? "active",
-                ownerToken = game.OwnerToken ?? "",
                 createdAt = game.CreatedAt,
                 updatedAt = game.UpdatedAt
             };
@@ -155,9 +158,15 @@ public class GamesController : ControllerBase
 
             Console.WriteLine($"Game OwnerToken present: {!string.IsNullOrEmpty(game.OwnerToken)}");
             
-            // Verify owner token if provided
-            if (!string.IsNullOrEmpty(request.OwnerToken) && 
-                !string.IsNullOrEmpty(game.OwnerToken) &&
+            // Require a valid owner token for all updates
+            if (string.IsNullOrWhiteSpace(request.OwnerToken))
+            {
+                Console.WriteLine($"PUT /api/games/{id} - Unauthorized: missing owner token");
+                _logger.LogWarning($"PUT /api/games/{id} - Unauthorized: missing owner token");
+                return Unauthorized(new { error = "owner token required" });
+            }
+
+            if (string.IsNullOrWhiteSpace(game.OwnerToken) ||
                 game.OwnerToken != request.OwnerToken)
             {
                 Console.WriteLine($"PUT /api/games/{id} - Forbidden: token mismatch");

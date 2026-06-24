@@ -36,8 +36,13 @@ var useMySql = !string.IsNullOrEmpty(connectionString) && connectionString != "D
 
 Console.WriteLine($"=== DATABASE CONFIGURATION ===");
 Console.WriteLine($"Connection string present: {!string.IsNullOrEmpty(connectionString)}");
-Console.WriteLine($"Connection string: {connectionString}");
 Console.WriteLine($"Use MySQL: {useMySql}");
+
+if (builder.Environment.IsProduction() && !useMySql)
+{
+    throw new InvalidOperationException(
+        "Production requires ConnectionStrings:DefaultConnection via environment variable or secret store.");
+}
 
 if (useMySql)
 {

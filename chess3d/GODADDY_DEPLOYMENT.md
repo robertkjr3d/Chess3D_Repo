@@ -127,15 +127,15 @@ The chess game should load and be able to save games to the database!
 
 **500 Error:**
 - Check `logs/stdout.log` in your `chess3d-api` folder on GoDaddy
-- Verify database connection string in `appsettings.Production.json`
+- Verify `ConnectionStrings__DefaultConnection` is set in Plesk environment variables
 
 **Database Connection Failed:**
-- Double-check these values in `appsettings.Production.json`:
-  - Host: `p3nlmysql143plsk.secureserver.net`
-  - Port: `3306`
-  - Database: `chess3d`
-  - User: `robertkjr3d`
-  - Password: `Kangbote1984$$`
+- Double-check the value of `ConnectionStrings__DefaultConnection` in Plesk:
+   - Host: your MySQL host
+   - Port: `3306`
+   - Database: `chess3d`
+   - User: your MySQL user
+   - Password: your MySQL password
 
 **404 on API calls:**
 - The `web.config` should handle everything automatically
@@ -162,10 +162,10 @@ The chess game should load and be able to save games to the database!
 ## Your Configuration
 
 **MySQL Database:**
-- Host: `p3nlmysql143plsk.secureserver.net:3306`
+- Host: `<set in secret manager / env var>`
 - Database: `chess3d`
-- User: `robertkjr3d`
-- Password: `Kangbote1984$$`
+- User: `<set in secret manager / env var>`
+- Password: `<set in secret manager / env var>`
 
 **Backend API:** `/chess3d-api/` (or wherever you place it)
 
